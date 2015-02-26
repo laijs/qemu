@@ -13,7 +13,6 @@
 #include "net/net.h"
 #include "hw/qdev.h"
 #include "qapi/qmp/qerror.h"
-#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "hw/block/block.h"
 #include "net/hub.h"
@@ -69,16 +68,16 @@ static void set_pointer(Object *obj, Visitor *v, Property *prop,
 
 static int parse_drive(DeviceState *dev, const char *str, void **ptr)
 {
-    BlockBackend *blk;
+    BlockDriverState *bs;
 
-    blk = blk_by_name(str);
-    if (!blk) {
+    bs = bdrv_find(str);
+    if (bs == NULL) {
         return -ENOENT;
     }
-    if (blk_attach_dev(blk, dev) < 0) {
+    if (bdrv_attach_dev(bs, dev) < 0) {
         return -EEXIST;
     }
-    *ptr = blk;
+    *ptr = bs;
     return 0;
 }
 
@@ -86,17 +85,17 @@ static void release_drive(Object *obj, const char *name, void *opaque)
 {
     DeviceState *dev = DEVICE(obj);
     Property *prop = opaque;
-    BlockBackend **ptr = qdev_get_prop_ptr(dev, prop);
+    BlockDriverState **ptr = qdev_get_prop_ptr(dev, prop);
 
     if (*ptr) {
-        blk_detach_dev(*ptr, dev);
+        bdrv_detach_dev(*ptr, dev);
         blockdev_auto_del(*ptr);
     }
 }
 
 static char *print_drive(void *ptr)
 {
-    return g_strdup(blk_name(ptr));
+    return g_strdup(bdrv_get_device_name(ptr));
 }
 
 static void get_drive(Object *obj, Visitor *v, void *opaque,
@@ -113,7 +112,7 @@ static void set_drive(Object *obj, Visitor *v, void *opaque,
 
 PropertyInfo qdev_prop_drive = {
     .name  = "str",
-    .description = "ID of a drive to use as a backend",
+    .legacy_name  = "drive",
     .get   = get_drive,
     .set   = set_drive,
     .release = release_drive,
@@ -170,92 +169,87 @@ static void set_chr(Object *obj, Visitor *v, void *opaque,
 
 PropertyInfo qdev_prop_chr = {
     .name  = "str",
-    .description = "ID of a chardev to use as a backend",
+    .legacy_name  = "chr",
     .get   = get_chr,
     .set   = set_chr,
     .release = release_chr,
 };
 
 /* --- netdev device --- */
-static void get_netdev(Object *obj, Visitor *v, void *opaque,
-                       const char *name, Error **errp)
-{
-    DeviceState *dev = DEVICE(obj);
-    Property *prop = opaque;
-    NICPeers *peers_ptr = qdev_get_prop_ptr(dev, prop);
-    char *p = g_strdup(peers_ptr->ncs[0] ? peers_ptr->ncs[0]->name : "");
 
-    visit_type_str(v, &p, name, errp);
-    g_free(p);
-}
-
-static void set_netdev(Object *obj, Visitor *v, void *opaque,
-                       const char *name, Error **errp)
+static int parse_netdev(DeviceState *dev, const char *str, void **ptr)
 {
-    DeviceState *dev = DEVICE(obj);
-    Property *prop = opaque;
-    NICPeers *peers_ptr = qdev_get_prop_ptr(dev, prop);
+    NICPeers *peers_ptr = (NICPeers *)ptr;
+    NICConf *conf = container_of(peers_ptr, NICConf, peers);
     NetClientState **ncs = peers_ptr->ncs;
     NetClientState *peers[MAX_QUEUE_NUM];
-    Error *local_err = NULL;
-    int queues, err = 0, i = 0;
-    char *str;
-
-    if (dev->realized) {
-        qdev_prop_set_after_realize(dev, name, errp);
-        return;
-    }
-
-    visit_type_str(v, &str, name, &local_err);
-    if (local_err) {
-        error_propagate(errp, local_err);
-        return;
-    }
+    int queues, i = 0;
+    int ret;
 
     queues = qemu_find_net_clients_except(str, peers,
                                           NET_CLIENT_OPTIONS_KIND_NIC,
                                           MAX_QUEUE_NUM);
     if (queues == 0) {
-        err = -ENOENT;
-        goto out;
+        ret = -ENOENT;
+        goto err;
     }
 
     if (queues > MAX_QUEUE_NUM) {
-        error_setg(errp, "queues of backend '%s'(%d) exceeds QEMU limitation(%d)",
-                   str, queues, MAX_QUEUE_NUM);
-        goto out;
+        ret = -E2BIG;
+        goto err;
     }
 
     for (i = 0; i < queues; i++) {
         if (peers[i] == NULL) {
-            err = -ENOENT;
-            goto out;
+            ret = -ENOENT;
+            goto err;
         }
 
         if (peers[i]->peer) {
-            err = -EEXIST;
-            goto out;
+            ret = -EEXIST;
+            goto err;
         }
 
         if (ncs[i]) {
-            err = -EINVAL;
-            goto out;
+            ret = -EINVAL;
+            goto err;
         }
 
         ncs[i] = peers[i];
         ncs[i]->queue_index = i;
     }
 
-    peers_ptr->queues = queues;
+    conf->queues = queues;
 
-out:
-    error_set_from_qdev_prop_error(errp, err, dev, prop, str);
-    g_free(str);
+    return 0;
+
+err:
+    return ret;
+}
+
+static char *print_netdev(void *ptr)
+{
+    NetClientState *netdev = ptr;
+    const char *val = netdev->name ? netdev->name : "";
+
+    return g_strdup(val);
+}
+
+static void get_netdev(Object *obj, Visitor *v, void *opaque,
+                       const char *name, Error **errp)
+{
+    get_pointer(obj, v, opaque, print_netdev, name, errp);
+}
+
+static void set_netdev(Object *obj, Visitor *v, void *opaque,
+                       const char *name, Error **errp)
+{
+    set_pointer(obj, v, opaque, parse_netdev, name, errp);
 }
 
 PropertyInfo qdev_prop_netdev = {
     .name  = "str",
-    .description = "ID of a netdev to use as a backend",
+    .legacy_name  = "netdev",
     .get   = get_netdev,
     .set   = set_netdev,
 };
@@ -335,28 +329,29 @@ static void set_vlan(Object *obj, Visitor *v, void *opaque,
 
 PropertyInfo qdev_prop_vlan = {
     .name  = "int32",
-    .description = "Integer VLAN id to connect to",
+    .legacy_name  = "vlan",
     .print = print_vlan,
     .get   = get_vlan,
     .set   = set_vlan,
 };
 
 int qdev_prop_set_drive(DeviceState *dev, const char *name,
-                        BlockBackend *value)
+                        BlockDriverState *value)
 {
-    Error *err = NULL;
-    object_property_set_str(OBJECT(dev),
-                            value ? blk_name(value) : "", name, &err);
-    if (err) {
-        qerror_report_err(err);
-        error_free(err);
+    Error *errp = NULL;
+    const char *bdrv_name = value ? bdrv_get_device_name(value) : "";
+    object_property_set_str(OBJECT(dev), bdrv_name,
+                            name, &errp);
+    if (errp) {
+        qerror_report_err(errp);
+        error_free(errp);
         return -1;
     }
     return 0;
 }
 
 void qdev_prop_set_drive_nofail(DeviceState *dev, const char *name,
-                                BlockBackend *value)
+                                BlockDriverState *value)
 {
     if (qdev_prop_set_drive(dev, name, value) < 0) {
         exit(1);
@@ -391,6 +386,56 @@ void qdev_set_nic_properties(DeviceState *dev, NICInfo *nd)
     nd->instantiated = 1;
 }
 
+/* --- iothread --- */
+
+static char *print_iothread(void *ptr)
+{
+    return iothread_get_id(ptr);
+}
+
+static int parse_iothread(DeviceState *dev, const char *str, void **ptr)
+{
+    IOThread *iothread;
+
+    iothread = iothread_find(str);
+    if (!iothread) {
+        return -ENOENT;
+    }
+    object_ref(OBJECT(iothread));
+    *ptr = iothread;
+    return 0;
+}
+
+static void get_iothread(Object *obj, struct Visitor *v, void *opaque,
+                         const char *name, Error **errp)
+{
+    get_pointer(obj, v, opaque, print_iothread, name, errp);
+}
+
+static void set_iothread(Object *obj, struct Visitor *v, void *opaque,
+                         const char *name, Error **errp)
+{
+    set_pointer(obj, v, opaque, parse_iothread, name, errp);
+}
+
+static void release_iothread(Object *obj, const char *name, void *opaque)
+{
+    DeviceState *dev = DEVICE(obj);
+    Property *prop = opaque;
+    IOThread **ptr = qdev_get_prop_ptr(dev, prop);
+
+    if (*ptr) {
+        object_unref(OBJECT(*ptr));
+    }
+}
+
+PropertyInfo qdev_prop_iothread = {
+    .name = "iothread",
+    .get = get_iothread,
+    .set = set_iothread,
+    .release = release_iothread,
+};
+
 static int qdev_add_one_global(QemuOpts *opts, void *opaque)
 {
     GlobalProperty *g;
@@ -399,7 +444,6 @@ static int qdev_add_one_global(QemuOpts *opts, void *opaque)
     g->driver   = qemu_opt_get(opts, "driver");
     g->property = qemu_opt_get(opts, "property");
     g->value    = qemu_opt_get(opts, "value");
-    g->user_provided = true;
     qdev_prop_register_global(g);
     return 0;
 }

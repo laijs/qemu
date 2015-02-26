@@ -53,11 +53,6 @@ typedef struct VirtioBusClass VirtioPCIBusClass;
 #define VIRTIO_PCI_BUS_CLASS(klass) \
         OBJECT_CLASS_CHECK(VirtioPCIBusClass, klass, TYPE_VIRTIO_PCI_BUS)
 
-/* Need to activate work-arounds for buggy guests at vmstate load. */
-#define VIRTIO_PCI_FLAG_BUS_MASTER_BUG_MIGRATION_BIT  0
-#define VIRTIO_PCI_FLAG_BUS_MASTER_BUG_MIGRATION \
-    (1 << VIRTIO_PCI_FLAG_BUS_MASTER_BUG_MIGRATION_BIT)
-
 /* Performance improves when virtqueue kick processing is decoupled from the
  * vcpu thread using ioeventfd for some devices. */
 #define VIRTIO_PCI_FLAG_USE_IOEVENTFD_BIT 1
@@ -136,6 +131,7 @@ struct VHostSCSIPCI {
 struct VirtIOBlkPCI {
     VirtIOPCIProxy parent_obj;
     VirtIOBlock vdev;
+    VirtIOBlkConf blk;
 };
 
 /*

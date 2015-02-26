@@ -181,10 +181,6 @@ tight_detect_smooth_image24(VncState *vs, int w, int h)
         }
     }
 
-    if (pixels == 0) {
-        return 0;
-    }
-
     /* 95% smooth or more ... */
     if (stats[0] * 33 / pixels >= 95) {
         return 0;
@@ -220,7 +216,8 @@ tight_detect_smooth_image24(VncState *vs, int w, int h)
         unsigned int errors;                                            \
         unsigned char *buf = vs->tight.tight.buffer;                    \
                                                                         \
-        endian = 0; /* FIXME */                                         \
+        endian = 0; /* FIXME: ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) != \
+                      (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG)); */ \
                                                                         \
                                                                         \
         max[0] = vs->client_pf.rmax;                                  \
@@ -270,9 +267,7 @@ tight_detect_smooth_image24(VncState *vs, int w, int h)
                 y += w;                                                 \
             }                                                           \
         }                                                               \
-        if (pixels == 0) {                                              \
-            return 0;                                                   \
-        }                                                               \
+                                                                        \
         if ((stats[0] + stats[1]) * 100 / pixels >= 90) {               \
             return 0;                                                   \
         }                                                               \
@@ -562,7 +557,8 @@ tight_filter_gradient24(VncState *vs, uint8_t *buf, int w, int h)
     buf32 = (uint32_t *)buf;
     memset(vs->tight.gradient.buffer, 0, w * 3 * sizeof(int));
 
-    if (1 /* FIXME */) {
+    if (1 /* FIXME: (vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) ==
+             (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG) */) {
         shift[0] = vs->client_pf.rshift;
         shift[1] = vs->client_pf.gshift;
         shift[2] = vs->client_pf.bshift;
@@ -619,7 +615,8 @@ tight_filter_gradient24(VncState *vs, uint8_t *buf, int w, int h)
                                                                         \
         memset (vs->tight.gradient.buffer, 0, w * 3 * sizeof(int));     \
                                                                         \
-        endian = 0; /* FIXME */                                         \
+        endian = 0; /* FIXME: ((vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) != \
+                       (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG)); */ \
                                                                         \
         max[0] = vs->client_pf.rmax;                                    \
         max[1] = vs->client_pf.gmax;                                    \
@@ -895,7 +892,8 @@ static void tight_pack24(VncState *vs, uint8_t *buf, size_t count, size_t *ret)
 
     buf32 = (uint32_t *)buf;
 
-    if (1 /* FIXME */) {
+    if (1 /* FIXME: (vs->clientds.flags & QEMU_BIG_ENDIAN_FLAG) ==
+             (vs->ds->surface->flags & QEMU_BIG_ENDIAN_FLAG) */) {
         rshift = vs->client_pf.rshift;
         gshift = vs->client_pf.gshift;
         bshift = vs->client_pf.bshift;
@@ -1489,7 +1487,7 @@ static int send_sub_rect(VncState *vs, int x, int y, int w, int h)
     }
 #endif
 
-    colors = tight_fill_palette(vs, x, y, w * h, &bg, &fg, &palette);
+    colors = tight_fill_palette(vs, x, y, w * h, &fg, &bg, &palette);
 
 #ifdef CONFIG_VNC_JPEG
     if (allow_jpeg && vs->tight.quality != (uint8_t)-1) {

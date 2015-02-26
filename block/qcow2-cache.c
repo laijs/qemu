@@ -48,31 +48,15 @@ Qcow2Cache *qcow2_cache_create(BlockDriverState *bs, int num_tables)
     Qcow2Cache *c;
     int i;
 
-    c = g_new0(Qcow2Cache, 1);
+    c = g_malloc0(sizeof(*c));
     c->size = num_tables;
-    c->entries = g_try_new0(Qcow2CachedTable, num_tables);
-    if (!c->entries) {
-        goto fail;
-    }
+    c->entries = g_malloc0(sizeof(*c->entries) * num_tables);
 
     for (i = 0; i < c->size; i++) {
-        c->entries[i].table = qemu_try_blockalign(bs->file, s->cluster_size);
-        if (c->entries[i].table == NULL) {
-            goto fail;
-        }
+        c->entries[i].table = qemu_blockalign(bs, s->cluster_size);
     }
 
     return c;
-
-fail:
-    if (c->entries) {
-        for (i = 0; i < c->size; i++) {
-            qemu_vfree(c->entries[i].table);
-        }
-    }
-    g_free(c->entries);
-    g_free(c);
-    return NULL;
 }
 
 int qcow2_cache_destroy(BlockDriverState* bs, Qcow2Cache *c)
@@ -253,9 +237,7 @@ static int qcow2_cache_find_entry_to_replace(Qcow2Cache *c)
 
         /* Give newer hits priority */
         /* TODO Check how to optimize the replacement strategy */
-        if (c->entries[i].cache_hits > 1) {
-            c->entries[i].cache_hits /= 2;
-        }
+        c->entries[i].cache_hits /= 2;
     }
 
     if (min_index == -1) {

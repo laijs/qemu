@@ -18,13 +18,10 @@
 #include "disas/disas.h"
 #include "tcg-op.h"
 #include "qemu/log.h"
-#include "exec/cpu_ldst.h"
 
-#include "exec/helper-proto.h"
-#include "exec/helper-gen.h"
-
-#include "trace-tcg.h"
-
+#include "helper.h"
+#define GEN_HELPER 1
+#include "helper.h"
 
 /* internal defines */
 typedef struct DisasContext {
@@ -579,6 +576,13 @@ static inline TCGv gen_ld32(TCGv addr, int index)
     return tmp;
 }
 
+static inline TCGv_i64 gen_ld64(TCGv addr, int index)
+{
+    TCGv_i64 tmp = tcg_temp_new_i64();
+    tcg_gen_qemu_ld64(tmp, addr, index);
+    return tmp;
+}
+
 static inline void gen_st8(TCGv val, TCGv addr, int index)
 {
     tcg_gen_qemu_st8(val, addr, index);
@@ -595,6 +599,12 @@ static inline void gen_st32(TCGv val, TCGv addr, int index)
 {
     tcg_gen_qemu_st32(val, addr, index);
     dead_tmp(val);
+}
+
+static inline void gen_st64(TCGv_i64 val, TCGv addr, int index)
+{
+    tcg_gen_qemu_st64(val, addr, index);
+    tcg_temp_free_i64(val);
 }
 
 static inline void gen_set_pc_im(uint32_t val)
@@ -1116,6 +1126,21 @@ static inline void gen_jmp(DisasContext *s, uint32_t dest)
         gen_goto_tb(s, 0, dest);
         s->is_jmp = DISAS_TB_JUMP;
     }
+}
+
+static inline void gen_mulxy(TCGv t0, TCGv t1, int x, int y)
+{
+    if (x) {
+        tcg_gen_sari_i32(t0, t0, 16);
+    } else {
+        gen_sxth(t0);
+    }
+    if (y) {
+        tcg_gen_sari_i32(t1, t1, 16);
+    } else {
+        gen_sxth(t1);
+    }
+    tcg_gen_mul_i32(t0, t0, t1);
 }
 
 /* Returns nonzero if access to the PSR is not permitted. Marks t0 as dead. */
@@ -1877,6 +1902,7 @@ static inline void gen_intermediate_code_internal(UniCore32CPU *cpu,
     CPUUniCore32State *env = &cpu->env;
     DisasContext dc1, *dc = &dc1;
     CPUBreakpoint *bp;
+    uint16_t *gen_opc_end;
     int j, lj;
     target_ulong pc_start;
     uint32_t next_page_start;
@@ -1889,6 +1915,8 @@ static inline void gen_intermediate_code_internal(UniCore32CPU *cpu,
     pc_start = tb->pc;
 
     dc->tb = tb;
+
+    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
 
     dc->is_jmp = DISAS_NEXT;
     dc->pc = pc_start;
@@ -1914,7 +1942,7 @@ static inline void gen_intermediate_code_internal(UniCore32CPU *cpu,
     }
 #endif
 
-    gen_tb_start(tb);
+    gen_tb_start();
     do {
         if (unlikely(!QTAILQ_EMPTY(&cs->breakpoints))) {
             QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
@@ -1930,7 +1958,7 @@ static inline void gen_intermediate_code_internal(UniCore32CPU *cpu,
             }
         }
         if (search_pc) {
-            j = tcg_op_buf_count();
+            j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
             if (lj < j) {
                 lj++;
                 while (lj < j) {
@@ -1962,7 +1990,7 @@ static inline void gen_intermediate_code_internal(UniCore32CPU *cpu,
          * Also stop translation when a page boundary is reached.  This
          * ensures prefetch aborts occur at the right place.  */
         num_insns++;
-    } while (!dc->is_jmp && !tcg_op_buf_full() &&
+    } while (!dc->is_jmp && tcg_ctx.gen_opc_ptr < gen_opc_end &&
              !cs->singlestep_enabled &&
              !singlestep &&
              dc->pc < next_page_start &&
@@ -2034,6 +2062,7 @@ static inline void gen_intermediate_code_internal(UniCore32CPU *cpu,
 
 done_generating:
     gen_tb_end(tb, num_insns);
+    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
 
 #ifdef DEBUG_DISAS
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
@@ -2044,7 +2073,7 @@ done_generating:
     }
 #endif
     if (search_pc) {
-        j = tcg_op_buf_count();
+        j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
         lj++;
         while (lj <= j) {
             tcg_ctx.gen_opc_instr_start[lj++] = 0;

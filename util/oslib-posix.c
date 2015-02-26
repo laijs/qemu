@@ -46,7 +46,6 @@ extern int daemon(int, int);
 #else
 #  define QEMU_VMALLOC_ALIGN getpagesize()
 #endif
-#define HUGETLBFS_MAGIC       0x958458f6
 
 #include <termios.h>
 #include <unistd.h>
@@ -59,12 +58,9 @@ extern int daemon(int, int);
 #include "qemu/sockets.h"
 #include <sys/mman.h>
 #include <libgen.h>
-#include <setjmp.h>
-#include <sys/signal.h>
 
 #ifdef CONFIG_LINUX
 #include <sys/syscall.h>
-#include <sys/vfs.h>
 #endif
 
 #ifdef __FreeBSD__
@@ -94,7 +90,7 @@ void *qemu_oom_check(void *ptr)
     return ptr;
 }
 
-void *qemu_try_memalign(size_t alignment, size_t size)
+void *qemu_memalign(size_t alignment, size_t size)
 {
     void *ptr;
 
@@ -106,25 +102,21 @@ void *qemu_try_memalign(size_t alignment, size_t size)
     int ret;
     ret = posix_memalign(&ptr, alignment, size);
     if (ret != 0) {
-        errno = ret;
-        ptr = NULL;
+        fprintf(stderr, "Failed to allocate %zu B: %s\n",
+                size, strerror(ret));
+        abort();
     }
 #elif defined(CONFIG_BSD)
-    ptr = valloc(size);
+    ptr = qemu_oom_check(valloc(size));
 #else
-    ptr = memalign(alignment, size);
+    ptr = qemu_oom_check(memalign(alignment, size));
 #endif
     trace_qemu_memalign(alignment, size, ptr);
     return ptr;
 }
 
-void *qemu_memalign(size_t alignment, size_t size)
-{
-    return qemu_oom_check(qemu_try_memalign(alignment, size));
-}
-
 /* alloc shared memory pages */
-void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment)
+void *qemu_anon_ram_alloc(size_t size)
 {
     size_t align = QEMU_VMALLOC_ALIGN;
     size_t total = size + align - getpagesize();
@@ -136,9 +128,6 @@ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment)
         return NULL;
     }
 
-    if (alignment) {
-        *alignment = align;
-    }
     ptr += offset;
     total -= offset;
 
@@ -342,76 +331,4 @@ void qemu_init_exec_dir(const char *argv0)
 char *qemu_get_exec_dir(void)
 {
     return g_strdup(exec_dir);
-}
-
-static sigjmp_buf sigjump;
-
-static void sigbus_handler(int signal)
-{
-    siglongjmp(sigjump, 1);
-}
-
-static size_t fd_getpagesize(int fd)
-{
-#ifdef CONFIG_LINUX
-    struct statfs fs;
-    int ret;
-
-    if (fd != -1) {
-        do {
-            ret = fstatfs(fd, &fs);
-        } while (ret != 0 && errno == EINTR);
-
-        if (ret == 0 && fs.f_type == HUGETLBFS_MAGIC) {
-            return fs.f_bsize;
-        }
-    }
-#endif
-
-    return getpagesize();
-}
-
-void os_mem_prealloc(int fd, char *area, size_t memory)
-{
-    int ret;
-    struct sigaction act, oldact;
-    sigset_t set, oldset;
-
-    memset(&act, 0, sizeof(act));
-    act.sa_handler = &sigbus_handler;
-    act.sa_flags = 0;
-
-    ret = sigaction(SIGBUS, &act, &oldact);
-    if (ret) {
-        perror("os_mem_prealloc: failed to install signal handler");
-        exit(1);
-    }
-
-    /* unblock SIGBUS */
-    sigemptyset(&set);
-    sigaddset(&set, SIGBUS);
-    pthread_sigmask(SIG_UNBLOCK, &set, &oldset);
-
-    if (sigsetjmp(sigjump, 1)) {
-        fprintf(stderr, "os_mem_prealloc: Insufficient free host memory "
-                        "pages available to allocate guest RAM\n");
-        exit(1);
-    } else {
-        int i;
-        size_t hpagesize = fd_getpagesize(fd);
-
-        /* MAP_POPULATE silently ignores failures */
-        memory = (memory + hpagesize - 1) & -hpagesize;
-        for (i = 0; i < (memory / hpagesize); i++) {
-            memset(area + (hpagesize * i), 0, 1);
-        }
-
-        ret = sigaction(SIGBUS, &oldact, NULL);
-        if (ret) {
-            perror("os_mem_prealloc: failed to reinstall signal handler");
-            exit(1);
-        }
-
-        pthread_sigmask(SIG_SETMASK, &oldset, NULL);
-    }
 }

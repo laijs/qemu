@@ -24,7 +24,6 @@
 
 #include "hw/hw.h"
 #include "hw/boards.h"
-#include "sysemu/block-backend.h"
 #include "sysemu/blockdev.h"
 #include "qemu/config-file.h"
 #include "sysemu/sysemu.h"
@@ -41,7 +40,7 @@ DriveInfo *add_init_drive(const char *optstr)
         return NULL;
 
     mc = MACHINE_GET_CLASS(current_machine);
-    dinfo = drive_new(opts, mc->block_default_type);
+    dinfo = drive_init(opts, mc->qemu_machine->block_default_type);
     if (!dinfo) {
         qemu_opts_del(opts);
         return NULL;
@@ -50,7 +49,7 @@ DriveInfo *add_init_drive(const char *optstr)
     return dinfo;
 }
 
-void hmp_drive_add(Monitor *mon, const QDict *qdict)
+void drive_hot_add(Monitor *mon, const QDict *qdict)
 {
     DriveInfo *dinfo = NULL;
     const char *opts = qdict_get_str(qdict, "opts");
@@ -77,6 +76,6 @@ void hmp_drive_add(Monitor *mon, const QDict *qdict)
 
 err:
     if (dinfo) {
-        blk_unref(blk_by_legacy_dinfo(dinfo));
+        drive_put_ref(dinfo);
     }
 }

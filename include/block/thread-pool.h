@@ -18,7 +18,11 @@
 #ifndef QEMU_THREAD_POOL_H
 #define QEMU_THREAD_POOL_H 1
 
-#include "block/block.h"
+#include "qemu-common.h"
+#include "qemu/queue.h"
+#include "qemu/thread.h"
+#include "block/coroutine.h"
+#include "block/block_int.h"
 
 typedef int ThreadPoolFunc(void *opaque);
 
@@ -27,9 +31,9 @@ typedef struct ThreadPool ThreadPool;
 ThreadPool *thread_pool_new(struct AioContext *ctx);
 void thread_pool_free(ThreadPool *pool);
 
-BlockAIOCB *thread_pool_submit_aio(ThreadPool *pool,
+BlockDriverAIOCB *thread_pool_submit_aio(ThreadPool *pool,
         ThreadPoolFunc *func, void *arg,
-        BlockCompletionFunc *cb, void *opaque);
+        BlockDriverCompletionFunc *cb, void *opaque);
 int coroutine_fn thread_pool_submit_co(ThreadPool *pool,
         ThreadPoolFunc *func, void *arg);
 void thread_pool_submit(ThreadPool *pool, ThreadPoolFunc *func, void *arg);

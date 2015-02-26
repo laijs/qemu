@@ -89,7 +89,6 @@ typedef struct APICCommonClass
     void (*external_nmi)(APICCommonState *s);
     void (*pre_save)(APICCommonState *s);
     void (*post_load)(APICCommonState *s);
-    void (*reset)(APICCommonState *s);
 } APICCommonClass;
 
 struct APICCommonState {
@@ -99,7 +98,6 @@ struct APICCommonState {
     X86CPU *cpu;
     uint32_t apicbase;
     uint8_t id;
-    uint8_t version;
     uint8_t arb_id;
     uint8_t tpr;
     uint32_t spurious_vec;

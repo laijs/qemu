@@ -1,5 +1,5 @@
 QA output created by 087
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=134217728
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=134217728 
 
 === Missing ID ===
 
@@ -7,23 +7,6 @@ Testing:
 QMP_VERSION
 {"return": {}}
 {"error": {"class": "GenericError", "desc": "Block device needs an ID"}}
-{"return": {}}
-{"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "SHUTDOWN"}
-{"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "DEVICE_TRAY_MOVED", "data": {"device": "ide1-cd0", "tray-open": true}}
-{"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "DEVICE_TRAY_MOVED", "data": {"device": "floppy0", "tray-open": true}}
-
-
-=== Duplicate ID ===
-
-Testing:
-QMP_VERSION
-{"return": {}}
-{"return": {}}
-{"error": {"class": "GenericError", "desc": "Device with id 'disk' already exists"}}
-{"error": {"class": "GenericError", "desc": "Device name 'test-node' conflicts with an existing node name"}}
-{"error": {"class": "GenericError", "desc": "node-name=disk is conflicting with a device id"}}
-{"error": {"class": "GenericError", "desc": "Duplicate node name"}}
-{"error": {"class": "GenericError", "desc": "node-name=disk3 is conflicting with a device id"}}
 {"return": {}}
 {"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "SHUTDOWN"}
 {"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "DEVICE_TRAY_MOVED", "data": {"device": "ide1-cd0", "tray-open": true}}
@@ -44,7 +27,7 @@ QMP_VERSION
 
 === Encrypted image ===
 
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=134217728 encryption=on
+Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=134217728 encryption=on 
 Testing: -S
 QMP_VERSION
 {"return": {}}
@@ -57,20 +40,7 @@ QMP_VERSION
 Testing:
 QMP_VERSION
 {"return": {}}
-{"error": {"class": "GenericError", "desc": "Guest must be stopped for opening of encrypted image"}}
-{"return": {}}
-{"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "SHUTDOWN"}
-{"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "DEVICE_TRAY_MOVED", "data": {"device": "ide1-cd0", "tray-open": true}}
-{"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "DEVICE_TRAY_MOVED", "data": {"device": "floppy0", "tray-open": true}}
-
-
-=== Missing driver ===
-
-Formatting 'TEST_DIR/t.IMGFMT', fmt=IMGFMT size=134217728 encryption=on
-Testing: -S
-QMP_VERSION
-{"return": {}}
-{"error": {"class": "GenericError", "desc": "Invalid parameter type for 'driver', expected: string"}}
+{"error": {"class": "GenericError", "desc": "could not open disk image disk: Guest must be stopped for opening of encrypted image"}}
 {"return": {}}
 {"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "SHUTDOWN"}
 {"timestamp": {"seconds":  TIMESTAMP, "microseconds":  TIMESTAMP}, "event": "DEVICE_TRAY_MOVED", "data": {"device": "ide1-cd0", "tray-open": true}}

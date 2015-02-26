@@ -104,12 +104,6 @@ typedef struct VirtQueueElement
 #define VIRTIO_DEVICE(obj) \
         OBJECT_CHECK(VirtIODevice, (obj), TYPE_VIRTIO_DEVICE)
 
-enum virtio_device_endian {
-    VIRTIO_DEVICE_ENDIAN_UNKNOWN,
-    VIRTIO_DEVICE_ENDIAN_LITTLE,
-    VIRTIO_DEVICE_ENDIAN_BIG,
-};
-
 struct VirtIODevice
 {
     DeviceState parent_obj;
@@ -127,7 +121,6 @@ struct VirtIODevice
     bool vm_running;
     VMChangeStateEntry *vmstate;
     char *bus_name;
-    uint8_t device_endian;
 };
 
 typedef struct VirtioDeviceClass {
@@ -157,12 +150,7 @@ typedef struct VirtioDeviceClass {
      * must mask in frontend instead.
      */
     void (*guest_notifier_mask)(VirtIODevice *vdev, int n, bool mask);
-    void (*save)(VirtIODevice *vdev, QEMUFile *f);
-    int (*load)(VirtIODevice *vdev, QEMUFile *f, int version_id);
 } VirtioDeviceClass;
-
-void virtio_instance_init_common(Object *proxy_obj, void *data,
-                                 size_t vdev_size, const char *vdev_name);
 
 void virtio_init(VirtIODevice *vdev, const char *name,
                          uint16_t device_id, size_t config_size);
@@ -196,7 +184,7 @@ void virtio_notify(VirtIODevice *vdev, VirtQueue *vq);
 
 void virtio_save(VirtIODevice *vdev, QEMUFile *f);
 
-int virtio_load(VirtIODevice *vdev, QEMUFile *f, int version_id);
+int virtio_load(VirtIODevice *vdev, QEMUFile *f);
 
 void virtio_notify_config(VirtIODevice *vdev);
 
@@ -230,6 +218,9 @@ int virtio_set_features(VirtIODevice *vdev, uint32_t val);
 /* Base devices.  */
 typedef struct VirtIOBlkConf VirtIOBlkConf;
 struct virtio_net_conf;
+VirtIODevice *virtio_net_init(DeviceState *dev, NICConf *conf,
+                              struct virtio_net_conf *net,
+                              uint32_t host_features);
 typedef struct virtio_serial_conf virtio_serial_conf;
 typedef struct VirtIOSCSIConf VirtIOSCSIConf;
 typedef struct VirtIORNGConf VirtIORNGConf;
@@ -262,10 +253,4 @@ void virtio_queue_set_host_notifier_fd_handler(VirtQueue *vq, bool assign,
                                                bool set_handler);
 void virtio_queue_notify_vq(VirtQueue *vq);
 void virtio_irq(VirtQueue *vq);
-
-static inline bool virtio_is_big_endian(VirtIODevice *vdev)
-{
-    assert(vdev->device_endian != VIRTIO_DEVICE_ENDIAN_UNKNOWN);
-    return vdev->device_endian == VIRTIO_DEVICE_ENDIAN_BIG;
-}
 #endif

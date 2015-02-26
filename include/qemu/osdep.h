@@ -5,7 +5,6 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <sys/types.h>
 #ifdef __OpenBSD__
 #include <sys/signal.h>
@@ -69,12 +68,6 @@ typedef signed int              int_fast16_t;
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #endif
 
-/* Minimum function that returns zero only iff both values are zero.
- * Intended for use with unsigned values only. */
-#ifndef MIN_NON_ZERO
-#define MIN_NON_ZERO(a, b) (((a) != 0 && (a) < (b)) ? (a) : (b))
-#endif
-
 #ifndef ROUND_UP
 #define ROUND_UP(n,d) (((n) + (d) - 1) & -(d))
 #endif
@@ -102,9 +95,8 @@ typedef signed int              int_fast16_t;
 #define qemu_printf printf
 
 int qemu_daemon(int nochdir, int noclose);
-void *qemu_try_memalign(size_t alignment, size_t size);
 void *qemu_memalign(size_t alignment, size_t size);
-void *qemu_anon_ram_alloc(size_t size, uint64_t *align);
+void *qemu_anon_ram_alloc(size_t size);
 void qemu_vfree(void *ptr);
 void qemu_anon_ram_free(void *ptr, size_t size);
 
@@ -124,16 +116,6 @@ void qemu_anon_ram_free(void *ptr, size_t size);
 #else
 #define QEMU_MADV_MERGEABLE QEMU_MADV_INVALID
 #endif
-#ifdef MADV_UNMERGEABLE
-#define QEMU_MADV_UNMERGEABLE MADV_UNMERGEABLE
-#else
-#define QEMU_MADV_UNMERGEABLE QEMU_MADV_INVALID
-#endif
-#ifdef MADV_DODUMP
-#define QEMU_MADV_DODUMP MADV_DODUMP
-#else
-#define QEMU_MADV_DODUMP QEMU_MADV_INVALID
-#endif
 #ifdef MADV_DONTDUMP
 #define QEMU_MADV_DONTDUMP MADV_DONTDUMP
 #else
@@ -151,8 +133,6 @@ void qemu_anon_ram_free(void *ptr, size_t size);
 #define QEMU_MADV_DONTNEED  POSIX_MADV_DONTNEED
 #define QEMU_MADV_DONTFORK  QEMU_MADV_INVALID
 #define QEMU_MADV_MERGEABLE QEMU_MADV_INVALID
-#define QEMU_MADV_UNMERGEABLE QEMU_MADV_INVALID
-#define QEMU_MADV_DODUMP QEMU_MADV_INVALID
 #define QEMU_MADV_DONTDUMP QEMU_MADV_INVALID
 #define QEMU_MADV_HUGEPAGE  QEMU_MADV_INVALID
 
@@ -162,8 +142,6 @@ void qemu_anon_ram_free(void *ptr, size_t size);
 #define QEMU_MADV_DONTNEED  QEMU_MADV_INVALID
 #define QEMU_MADV_DONTFORK  QEMU_MADV_INVALID
 #define QEMU_MADV_MERGEABLE QEMU_MADV_INVALID
-#define QEMU_MADV_UNMERGEABLE QEMU_MADV_INVALID
-#define QEMU_MADV_DODUMP QEMU_MADV_INVALID
 #define QEMU_MADV_DONTDUMP QEMU_MADV_INVALID
 #define QEMU_MADV_HUGEPAGE  QEMU_MADV_INVALID
 
@@ -253,10 +231,24 @@ char *qemu_get_exec_dir(void);
  * Search the auxiliary vector for @type, returning the value
  * or 0 if @type is not present.
  */
+#if defined(CONFIG_GETAUXVAL) || defined(__linux__)
 unsigned long qemu_getauxval(unsigned long type);
+#else
+static inline unsigned long qemu_getauxval(unsigned long type) { return 0; }
+#endif
+
+/**
+ * qemu_init_auxval:
+ * @envp: the third argument to main
+ *
+ * If supported and required, locate the auxiliary vector at program startup.
+ */
+#if defined(CONFIG_GETAUXVAL) || !defined(__linux__)
+static inline void qemu_init_auxval(char **envp) { }
+#else
+void qemu_init_auxval(char **envp);
+#endif
 
 void qemu_set_tty_echo(int fd, bool echo);
-
-void os_mem_prealloc(int fd, char *area, size_t sz);
 
 #endif

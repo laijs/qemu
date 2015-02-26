@@ -9,13 +9,10 @@
  */
 
 #include "qemu-io.h"
-#include "sysemu/block-backend.h"
-#include "block/block.h"
-#include "block/block_int.h" /* for info_f() */
+#include "block/block_int.h"
 #include "block/qapi.h"
 #include "qemu/main-loop.h"
 #include "qemu/timer.h"
-#include "sysemu/block-backend.h"
 
 #define CMD_NOFILE_OK   0x01
 
@@ -32,7 +29,7 @@ static int compare_cmdname(const void *a, const void *b)
 
 void qemuio_add_command(const cmdinfo_t *ci)
 {
-    cmdtab = g_renew(cmdinfo_t, cmdtab, ++ncmds);
+    cmdtab = g_realloc(cmdtab, ++ncmds * sizeof(*cmdtab));
     cmdtab[ncmds - 1] = *ci;
     qsort(cmdtab, ncmds, sizeof(*cmdtab), compare_cmdname);
 }
@@ -43,24 +40,24 @@ int qemuio_command_usage(const cmdinfo_t *ci)
     return 0;
 }
 
-static int init_check_command(BlockBackend *blk, const cmdinfo_t *ct)
+static int init_check_command(BlockDriverState *bs, const cmdinfo_t *ct)
 {
     if (ct->flags & CMD_FLAG_GLOBAL) {
         return 1;
     }
-    if (!(ct->flags & CMD_NOFILE_OK) && !blk) {
+    if (!(ct->flags & CMD_NOFILE_OK) && !bs) {
         fprintf(stderr, "no file open, try 'help open'\n");
         return 0;
     }
     return 1;
 }
 
-static int command(BlockBackend *blk, const cmdinfo_t *ct, int argc,
+static int command(BlockDriverState *bs, const cmdinfo_t *ct, int argc,
                    char **argv)
 {
     char *cmd = argv[0];
 
-    if (!init_check_command(blk, ct)) {
+    if (!init_check_command(bs, ct)) {
         return 0;
     }
 
@@ -81,7 +78,7 @@ static int command(BlockBackend *blk, const cmdinfo_t *ct, int argc,
         return 0;
     }
     optind = 0;
-    return ct->cfunc(blk, argc, argv);
+    return ct->cfunc(bs, argc, argv);
 }
 
 static const cmdinfo_t *find_command(const char *cmd)
@@ -117,14 +114,23 @@ static char **breakline(char *input, int *count)
 {
     int c = 0;
     char *p;
-    char **rval = g_new0(char *, 1);
+    char **rval = g_malloc0(sizeof(char *));
+    char **tmp;
 
     while (rval && (p = qemu_strsep(&input, " ")) != NULL) {
         if (!*p) {
             continue;
         }
         c++;
-        rval = g_renew(char *, rval, (c + 1));
+        tmp = g_realloc(rval, sizeof(*rval) * (c + 1));
+        if (!tmp) {
+            g_free(rval);
+            rval = NULL;
+            c = 0;
+            break;
+        } else {
+            rval = tmp;
+        }
         rval[c - 1] = p;
         rval[c] = NULL;
     }
@@ -270,14 +276,14 @@ static int parse_pattern(const char *arg)
  */
 
 #define MISALIGN_OFFSET     16
-static void *qemu_io_alloc(BlockBackend *blk, size_t len, int pattern)
+static void *qemu_io_alloc(BlockDriverState *bs, size_t len, int pattern)
 {
     void *buf;
 
     if (qemuio_misalign) {
         len += MISALIGN_OFFSET;
     }
-    buf = blk_blockalign(blk, len);
+    buf = qemu_blockalign(bs, len);
     memset(buf, pattern, len);
     if (qemuio_misalign) {
         buf += MISALIGN_OFFSET;
@@ -343,7 +349,7 @@ static void print_report(const char *op, struct timeval *t, int64_t offset,
  * vector matching it.
  */
 static void *
-create_iovec(BlockBackend *blk, QEMUIOVector *qiov, char **argv, int nr_iov,
+create_iovec(BlockDriverState *bs, QEMUIOVector *qiov, char **argv, int nr_iov,
              int pattern)
 {
     size_t *sizes = g_new0(size_t, nr_iov);
@@ -380,7 +386,7 @@ create_iovec(BlockBackend *blk, QEMUIOVector *qiov, char **argv, int nr_iov,
 
     qemu_iovec_init(qiov, nr_iov);
 
-    buf = p = qemu_io_alloc(blk, count, pattern);
+    buf = p = qemu_io_alloc(bs, count, pattern);
 
     for (i = 0; i < nr_iov; i++) {
         qemu_iovec_add(qiov, p, sizes[i]);
@@ -392,12 +398,12 @@ fail:
     return buf;
 }
 
-static int do_read(BlockBackend *blk, char *buf, int64_t offset, int count,
+static int do_read(BlockDriverState *bs, char *buf, int64_t offset, int count,
                    int *total)
 {
     int ret;
 
-    ret = blk_read(blk, offset >> 9, (uint8_t *)buf, count >> 9);
+    ret = bdrv_read(bs, offset >> 9, (uint8_t *)buf, count >> 9);
     if (ret < 0) {
         return ret;
     }
@@ -405,12 +411,12 @@ static int do_read(BlockBackend *blk, char *buf, int64_t offset, int count,
     return 1;
 }
 
-static int do_write(BlockBackend *blk, char *buf, int64_t offset, int count,
+static int do_write(BlockDriverState *bs, char *buf, int64_t offset, int count,
                     int *total)
 {
     int ret;
 
-    ret = blk_write(blk, offset >> 9, (uint8_t *)buf, count >> 9);
+    ret = bdrv_write(bs, offset >> 9, (uint8_t *)buf, count >> 9);
     if (ret < 0) {
         return ret;
     }
@@ -418,20 +424,20 @@ static int do_write(BlockBackend *blk, char *buf, int64_t offset, int count,
     return 1;
 }
 
-static int do_pread(BlockBackend *blk, char *buf, int64_t offset, int count,
+static int do_pread(BlockDriverState *bs, char *buf, int64_t offset, int count,
                     int *total)
 {
-    *total = blk_pread(blk, offset, (uint8_t *)buf, count);
+    *total = bdrv_pread(bs, offset, (uint8_t *)buf, count);
     if (*total < 0) {
         return *total;
     }
     return 1;
 }
 
-static int do_pwrite(BlockBackend *blk, char *buf, int64_t offset, int count,
+static int do_pwrite(BlockDriverState *bs, char *buf, int64_t offset, int count,
                      int *total)
 {
-    *total = blk_pwrite(blk, offset, (uint8_t *)buf, count);
+    *total = bdrv_pwrite(bs, offset, (uint8_t *)buf, count);
     if (*total < 0) {
         return *total;
     }
@@ -439,7 +445,7 @@ static int do_pwrite(BlockBackend *blk, char *buf, int64_t offset, int count,
 }
 
 typedef struct {
-    BlockBackend *blk;
+    BlockDriverState *bs;
     int64_t offset;
     int count;
     int *total;
@@ -451,8 +457,8 @@ static void coroutine_fn co_write_zeroes_entry(void *opaque)
 {
     CoWriteZeroes *data = opaque;
 
-    data->ret = blk_co_write_zeroes(data->blk, data->offset / BDRV_SECTOR_SIZE,
-                                    data->count / BDRV_SECTOR_SIZE, 0);
+    data->ret = bdrv_co_write_zeroes(data->bs, data->offset / BDRV_SECTOR_SIZE,
+                                     data->count / BDRV_SECTOR_SIZE, 0);
     data->done = true;
     if (data->ret < 0) {
         *data->total = data->ret;
@@ -462,12 +468,12 @@ static void coroutine_fn co_write_zeroes_entry(void *opaque)
     *data->total = data->count;
 }
 
-static int do_co_write_zeroes(BlockBackend *blk, int64_t offset, int count,
+static int do_co_write_zeroes(BlockDriverState *bs, int64_t offset, int count,
                               int *total)
 {
     Coroutine *co;
     CoWriteZeroes data = {
-        .blk    = blk,
+        .bs     = bs,
         .offset = offset,
         .count  = count,
         .total  = total,
@@ -477,7 +483,7 @@ static int do_co_write_zeroes(BlockBackend *blk, int64_t offset, int count,
     co = qemu_coroutine_create(co_write_zeroes_entry);
     qemu_coroutine_enter(co, &data);
     while (!data.done) {
-        aio_poll(blk_get_aio_context(blk), true);
+        qemu_aio_wait();
     }
     if (data.ret < 0) {
         return data.ret;
@@ -486,12 +492,12 @@ static int do_co_write_zeroes(BlockBackend *blk, int64_t offset, int count,
     }
 }
 
-static int do_write_compressed(BlockBackend *blk, char *buf, int64_t offset,
+static int do_write_compressed(BlockDriverState *bs, char *buf, int64_t offset,
                                int count, int *total)
 {
     int ret;
 
-    ret = blk_write_compressed(blk, offset >> 9, (uint8_t *)buf, count >> 9);
+    ret = bdrv_write_compressed(bs, offset >> 9, (uint8_t *)buf, count >> 9);
     if (ret < 0) {
         return ret;
     }
@@ -499,20 +505,20 @@ static int do_write_compressed(BlockBackend *blk, char *buf, int64_t offset,
     return 1;
 }
 
-static int do_load_vmstate(BlockBackend *blk, char *buf, int64_t offset,
+static int do_load_vmstate(BlockDriverState *bs, char *buf, int64_t offset,
                            int count, int *total)
 {
-    *total = blk_load_vmstate(blk, (uint8_t *)buf, offset, count);
+    *total = bdrv_load_vmstate(bs, (uint8_t *)buf, offset, count);
     if (*total < 0) {
         return *total;
     }
     return 1;
 }
 
-static int do_save_vmstate(BlockBackend *blk, char *buf, int64_t offset,
+static int do_save_vmstate(BlockDriverState *bs, char *buf, int64_t offset,
                            int count, int *total)
 {
-    *total = blk_save_vmstate(blk, (uint8_t *)buf, offset, count);
+    *total = bdrv_save_vmstate(bs, (uint8_t *)buf, offset, count);
     if (*total < 0) {
         return *total;
     }
@@ -525,13 +531,13 @@ static void aio_rw_done(void *opaque, int ret)
     *(int *)opaque = ret;
 }
 
-static int do_aio_readv(BlockBackend *blk, QEMUIOVector *qiov,
+static int do_aio_readv(BlockDriverState *bs, QEMUIOVector *qiov,
                         int64_t offset, int *total)
 {
     int async_ret = NOT_DONE;
 
-    blk_aio_readv(blk, offset >> 9, qiov, qiov->size >> 9,
-                  aio_rw_done, &async_ret);
+    bdrv_aio_readv(bs, offset >> 9, qiov, qiov->size >> 9,
+                   aio_rw_done, &async_ret);
     while (async_ret == NOT_DONE) {
         main_loop_wait(false);
     }
@@ -540,13 +546,13 @@ static int do_aio_readv(BlockBackend *blk, QEMUIOVector *qiov,
     return async_ret < 0 ? async_ret : 1;
 }
 
-static int do_aio_writev(BlockBackend *blk, QEMUIOVector *qiov,
+static int do_aio_writev(BlockDriverState *bs, QEMUIOVector *qiov,
                          int64_t offset, int *total)
 {
     int async_ret = NOT_DONE;
 
-    blk_aio_writev(blk, offset >> 9, qiov, qiov->size >> 9,
-                   aio_rw_done, &async_ret);
+    bdrv_aio_writev(bs, offset >> 9, qiov, qiov->size >> 9,
+                    aio_rw_done, &async_ret);
     while (async_ret == NOT_DONE) {
         main_loop_wait(false);
     }
@@ -570,7 +576,7 @@ static void multiwrite_cb(void *opaque, int ret)
     }
 }
 
-static int do_aio_multiwrite(BlockBackend *blk, BlockRequest* reqs,
+static int do_aio_multiwrite(BlockDriverState *bs, BlockRequest* reqs,
                              int num_reqs, int *total)
 {
     int i, ret;
@@ -586,7 +592,7 @@ static int do_aio_multiwrite(BlockBackend *blk, BlockRequest* reqs,
         *total += reqs[i].qiov->size;
     }
 
-    ret = blk_aio_multiwrite(blk, reqs, num_reqs);
+    ret = bdrv_aio_multiwrite(bs, reqs, num_reqs);
     if (ret < 0) {
         return ret;
     }
@@ -612,7 +618,7 @@ static void read_help(void)
 " -b, -- read from the VM state rather than the virtual disk\n"
 " -C, -- report statistics in a machine parsable format\n"
 " -l, -- length for pattern verification (only with -P)\n"
-" -p, -- use blk_pread to read the file\n"
+" -p, -- use bdrv_pread to read the file\n"
 " -P, -- use a pattern to verify read data\n"
 " -q, -- quiet mode, do not show I/O statistics\n"
 " -s, -- start offset for pattern verification (only with -P)\n"
@@ -620,7 +626,7 @@ static void read_help(void)
 "\n");
 }
 
-static int read_f(BlockBackend *blk, int argc, char **argv);
+static int read_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t read_cmd = {
     .name       = "read",
@@ -633,7 +639,7 @@ static const cmdinfo_t read_cmd = {
     .help       = read_help,
 };
 
-static int read_f(BlockBackend *blk, int argc, char **argv)
+static int read_f(BlockDriverState *bs, int argc, char **argv)
 {
     struct timeval t1, t2;
     int Cflag = 0, pflag = 0, qflag = 0, vflag = 0;
@@ -739,15 +745,15 @@ static int read_f(BlockBackend *blk, int argc, char **argv)
         }
     }
 
-    buf = qemu_io_alloc(blk, count, 0xab);
+    buf = qemu_io_alloc(bs, count, 0xab);
 
     gettimeofday(&t1, NULL);
     if (pflag) {
-        cnt = do_pread(blk, buf, offset, count, &total);
+        cnt = do_pread(bs, buf, offset, count, &total);
     } else if (bflag) {
-        cnt = do_load_vmstate(blk, buf, offset, count, &total);
+        cnt = do_load_vmstate(bs, buf, offset, count, &total);
     } else {
-        cnt = do_read(blk, buf, offset, count, &total);
+        cnt = do_read(bs, buf, offset, count, &total);
     }
     gettimeofday(&t2, NULL);
 
@@ -804,7 +810,7 @@ static void readv_help(void)
 "\n");
 }
 
-static int readv_f(BlockBackend *blk, int argc, char **argv);
+static int readv_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t readv_cmd = {
     .name       = "readv",
@@ -816,7 +822,7 @@ static const cmdinfo_t readv_cmd = {
     .help       = readv_help,
 };
 
-static int readv_f(BlockBackend *blk, int argc, char **argv)
+static int readv_f(BlockDriverState *bs, int argc, char **argv)
 {
     struct timeval t1, t2;
     int Cflag = 0, qflag = 0, vflag = 0;
@@ -872,13 +878,13 @@ static int readv_f(BlockBackend *blk, int argc, char **argv)
     }
 
     nr_iov = argc - optind;
-    buf = create_iovec(blk, &qiov, &argv[optind], nr_iov, 0xab);
+    buf = create_iovec(bs, &qiov, &argv[optind], nr_iov, 0xab);
     if (buf == NULL) {
         return 0;
     }
 
     gettimeofday(&t1, NULL);
-    cnt = do_aio_readv(blk, &qiov, offset, &total);
+    cnt = do_aio_readv(bs, &qiov, offset, &total);
     gettimeofday(&t2, NULL);
 
     if (cnt < 0) {
@@ -926,16 +932,16 @@ static void write_help(void)
 " Writes into a segment of the currently open file, using a buffer\n"
 " filled with a set pattern (0xcdcdcdcd).\n"
 " -b, -- write to the VM state rather than the virtual disk\n"
-" -c, -- write compressed data with blk_write_compressed\n"
-" -p, -- use blk_pwrite to write the file\n"
+" -c, -- write compressed data with bdrv_write_compressed\n"
+" -p, -- use bdrv_pwrite to write the file\n"
 " -P, -- use different pattern to fill file\n"
 " -C, -- report statistics in a machine parsable format\n"
 " -q, -- quiet mode, do not show I/O statistics\n"
-" -z, -- write zeroes using blk_co_write_zeroes\n"
+" -z, -- write zeroes using bdrv_co_write_zeroes\n"
 "\n");
 }
 
-static int write_f(BlockBackend *blk, int argc, char **argv);
+static int write_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t write_cmd = {
     .name       = "write",
@@ -948,7 +954,7 @@ static const cmdinfo_t write_cmd = {
     .help       = write_help,
 };
 
-static int write_f(BlockBackend *blk, int argc, char **argv)
+static int write_f(BlockDriverState *bs, int argc, char **argv)
 {
     struct timeval t1, t2;
     int Cflag = 0, pflag = 0, qflag = 0, bflag = 0, Pflag = 0, zflag = 0;
@@ -1035,20 +1041,20 @@ static int write_f(BlockBackend *blk, int argc, char **argv)
     }
 
     if (!zflag) {
-        buf = qemu_io_alloc(blk, count, pattern);
+        buf = qemu_io_alloc(bs, count, pattern);
     }
 
     gettimeofday(&t1, NULL);
     if (pflag) {
-        cnt = do_pwrite(blk, buf, offset, count, &total);
+        cnt = do_pwrite(bs, buf, offset, count, &total);
     } else if (bflag) {
-        cnt = do_save_vmstate(blk, buf, offset, count, &total);
+        cnt = do_save_vmstate(bs, buf, offset, count, &total);
     } else if (zflag) {
-        cnt = do_co_write_zeroes(blk, offset, count, &total);
+        cnt = do_co_write_zeroes(bs, offset, count, &total);
     } else if (cflag) {
-        cnt = do_write_compressed(blk, buf, offset, count, &total);
+        cnt = do_write_compressed(bs, buf, offset, count, &total);
     } else {
-        cnt = do_write(blk, buf, offset, count, &total);
+        cnt = do_write(bs, buf, offset, count, &total);
     }
     gettimeofday(&t2, NULL);
 
@@ -1091,7 +1097,7 @@ writev_help(void)
 "\n");
 }
 
-static int writev_f(BlockBackend *blk, int argc, char **argv);
+static int writev_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t writev_cmd = {
     .name       = "writev",
@@ -1103,7 +1109,7 @@ static const cmdinfo_t writev_cmd = {
     .help       = writev_help,
 };
 
-static int writev_f(BlockBackend *blk, int argc, char **argv)
+static int writev_f(BlockDriverState *bs, int argc, char **argv)
 {
     struct timeval t1, t2;
     int Cflag = 0, qflag = 0;
@@ -1153,13 +1159,13 @@ static int writev_f(BlockBackend *blk, int argc, char **argv)
     }
 
     nr_iov = argc - optind;
-    buf = create_iovec(blk, &qiov, &argv[optind], nr_iov, pattern);
+    buf = create_iovec(bs, &qiov, &argv[optind], nr_iov, pattern);
     if (buf == NULL) {
         return 0;
     }
 
     gettimeofday(&t1, NULL);
-    cnt = do_aio_writev(blk, &qiov, offset, &total);
+    cnt = do_aio_writev(bs, &qiov, offset, &total);
     gettimeofday(&t2, NULL);
 
     if (cnt < 0) {
@@ -1200,7 +1206,7 @@ static void multiwrite_help(void)
 "\n");
 }
 
-static int multiwrite_f(BlockBackend *blk, int argc, char **argv);
+static int multiwrite_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t multiwrite_cmd = {
     .name       = "multiwrite",
@@ -1212,7 +1218,7 @@ static const cmdinfo_t multiwrite_cmd = {
     .help       = multiwrite_help,
 };
 
-static int multiwrite_f(BlockBackend *blk, int argc, char **argv)
+static int multiwrite_f(BlockDriverState *bs, int argc, char **argv)
 {
     struct timeval t1, t2;
     int Cflag = 0, qflag = 0;
@@ -1258,9 +1264,9 @@ static int multiwrite_f(BlockBackend *blk, int argc, char **argv)
         }
     }
 
-    reqs = g_new0(BlockRequest, nr_reqs);
-    buf = g_new0(char *, nr_reqs);
-    qiovs = g_new(QEMUIOVector, nr_reqs);
+    reqs = g_malloc0(nr_reqs * sizeof(*reqs));
+    buf = g_malloc0(nr_reqs * sizeof(*buf));
+    qiovs = g_malloc(nr_reqs * sizeof(*qiovs));
 
     for (i = 0; i < nr_reqs && optind < argc; i++) {
         int j;
@@ -1293,7 +1299,7 @@ static int multiwrite_f(BlockBackend *blk, int argc, char **argv)
         nr_iov = j - optind;
 
         /* Build request */
-        buf[i] = create_iovec(blk, &qiovs[i], &argv[optind], nr_iov, pattern);
+        buf[i] = create_iovec(bs, &qiovs[i], &argv[optind], nr_iov, pattern);
         if (buf[i] == NULL) {
             goto out;
         }
@@ -1311,7 +1317,7 @@ static int multiwrite_f(BlockBackend *blk, int argc, char **argv)
     nr_reqs = i;
 
     gettimeofday(&t1, NULL);
-    cnt = do_aio_multiwrite(blk, reqs, nr_reqs, &total);
+    cnt = do_aio_multiwrite(bs, reqs, nr_reqs, &total);
     gettimeofday(&t2, NULL);
 
     if (cnt < 0) {
@@ -1340,7 +1346,6 @@ out:
 }
 
 struct aio_ctx {
-    BlockBackend *blk;
     QEMUIOVector qiov;
     int64_t offset;
     char *buf;
@@ -1348,7 +1353,6 @@ struct aio_ctx {
     int vflag;
     int Cflag;
     int Pflag;
-    BlockAcctCookie acct;
     int pattern;
     struct timeval t1;
 };
@@ -1365,8 +1369,6 @@ static void aio_write_done(void *opaque, int ret)
         printf("aio_write failed: %s\n", strerror(-ret));
         goto out;
     }
-
-    block_acct_done(blk_get_stats(ctx->blk), &ctx->acct);
 
     if (ctx->qflag) {
         goto out;
@@ -1404,8 +1406,6 @@ static void aio_read_done(void *opaque, int ret)
         }
         g_free(cmp_buf);
     }
-
-    block_acct_done(blk_get_stats(ctx->blk), &ctx->acct);
 
     if (ctx->qflag) {
         goto out;
@@ -1445,7 +1445,7 @@ static void aio_read_help(void)
 "\n");
 }
 
-static int aio_read_f(BlockBackend *blk, int argc, char **argv);
+static int aio_read_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t aio_read_cmd = {
     .name       = "aio_read",
@@ -1457,12 +1457,11 @@ static const cmdinfo_t aio_read_cmd = {
     .help       = aio_read_help,
 };
 
-static int aio_read_f(BlockBackend *blk, int argc, char **argv)
+static int aio_read_f(BlockDriverState *bs, int argc, char **argv)
 {
     int nr_iov, c;
     struct aio_ctx *ctx = g_new0(struct aio_ctx, 1);
 
-    ctx->blk = blk;
     while ((c = getopt(argc, argv, "CP:qv")) != EOF) {
         switch (c) {
         case 'C':
@@ -1509,17 +1508,15 @@ static int aio_read_f(BlockBackend *blk, int argc, char **argv)
     }
 
     nr_iov = argc - optind;
-    ctx->buf = create_iovec(blk, &ctx->qiov, &argv[optind], nr_iov, 0xab);
+    ctx->buf = create_iovec(bs, &ctx->qiov, &argv[optind], nr_iov, 0xab);
     if (ctx->buf == NULL) {
         g_free(ctx);
         return 0;
     }
 
     gettimeofday(&ctx->t1, NULL);
-    block_acct_start(blk_get_stats(blk), &ctx->acct, ctx->qiov.size,
-                     BLOCK_ACCT_READ);
-    blk_aio_readv(blk, ctx->offset >> 9, &ctx->qiov,
-                  ctx->qiov.size >> 9, aio_read_done, ctx);
+    bdrv_aio_readv(bs, ctx->offset >> 9, &ctx->qiov,
+                   ctx->qiov.size >> 9, aio_read_done, ctx);
     return 0;
 }
 
@@ -1543,7 +1540,7 @@ static void aio_write_help(void)
 "\n");
 }
 
-static int aio_write_f(BlockBackend *blk, int argc, char **argv);
+static int aio_write_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t aio_write_cmd = {
     .name       = "aio_write",
@@ -1555,13 +1552,12 @@ static const cmdinfo_t aio_write_cmd = {
     .help       = aio_write_help,
 };
 
-static int aio_write_f(BlockBackend *blk, int argc, char **argv)
+static int aio_write_f(BlockDriverState *bs, int argc, char **argv)
 {
     int nr_iov, c;
     int pattern = 0xcd;
     struct aio_ctx *ctx = g_new0(struct aio_ctx, 1);
 
-    ctx->blk = blk;
     while ((c = getopt(argc, argv, "CqP:")) != EOF) {
         switch (c) {
         case 'C':
@@ -1604,23 +1600,21 @@ static int aio_write_f(BlockBackend *blk, int argc, char **argv)
     }
 
     nr_iov = argc - optind;
-    ctx->buf = create_iovec(blk, &ctx->qiov, &argv[optind], nr_iov, pattern);
+    ctx->buf = create_iovec(bs, &ctx->qiov, &argv[optind], nr_iov, pattern);
     if (ctx->buf == NULL) {
         g_free(ctx);
         return 0;
     }
 
     gettimeofday(&ctx->t1, NULL);
-    block_acct_start(blk_get_stats(blk), &ctx->acct, ctx->qiov.size,
-                     BLOCK_ACCT_WRITE);
-    blk_aio_writev(blk, ctx->offset >> 9, &ctx->qiov,
-                   ctx->qiov.size >> 9, aio_write_done, ctx);
+    bdrv_aio_writev(bs, ctx->offset >> 9, &ctx->qiov,
+                    ctx->qiov.size >> 9, aio_write_done, ctx);
     return 0;
 }
 
-static int aio_flush_f(BlockBackend *blk, int argc, char **argv)
+static int aio_flush_f(BlockDriverState *bs, int argc, char **argv)
 {
-    blk_drain_all();
+    bdrv_drain_all();
     return 0;
 }
 
@@ -1630,9 +1624,9 @@ static const cmdinfo_t aio_flush_cmd = {
     .oneline    = "completes all outstanding aio requests"
 };
 
-static int flush_f(BlockBackend *blk, int argc, char **argv)
+static int flush_f(BlockDriverState *bs, int argc, char **argv)
 {
-    blk_flush(blk);
+    bdrv_flush(bs);
     return 0;
 }
 
@@ -1643,7 +1637,7 @@ static const cmdinfo_t flush_cmd = {
     .oneline    = "flush all in-core file state to disk",
 };
 
-static int truncate_f(BlockBackend *blk, int argc, char **argv)
+static int truncate_f(BlockDriverState *bs, int argc, char **argv)
 {
     int64_t offset;
     int ret;
@@ -1654,7 +1648,7 @@ static int truncate_f(BlockBackend *blk, int argc, char **argv)
         return 0;
     }
 
-    ret = blk_truncate(blk, offset);
+    ret = bdrv_truncate(bs, offset);
     if (ret < 0) {
         printf("truncate: %s\n", strerror(-ret));
         return 0;
@@ -1673,12 +1667,12 @@ static const cmdinfo_t truncate_cmd = {
     .oneline    = "truncates the current file at the given offset",
 };
 
-static int length_f(BlockBackend *blk, int argc, char **argv)
+static int length_f(BlockDriverState *bs, int argc, char **argv)
 {
     int64_t size;
     char s1[64];
 
-    size = blk_getlength(blk);
+    size = bdrv_getlength(bs);
     if (size < 0) {
         printf("getlength: %s\n", strerror(-size));
         return 0;
@@ -1698,9 +1692,8 @@ static const cmdinfo_t length_cmd = {
 };
 
 
-static int info_f(BlockBackend *blk, int argc, char **argv)
+static int info_f(BlockDriverState *bs, int argc, char **argv)
 {
-    BlockDriverState *bs = blk_bs(blk);
     BlockDriverInfo bdi;
     ImageInfoSpecific *spec_info;
     char s1[64], s2[64];
@@ -1758,7 +1751,7 @@ static void discard_help(void)
 "\n");
 }
 
-static int discard_f(BlockBackend *blk, int argc, char **argv);
+static int discard_f(BlockDriverState *bs, int argc, char **argv);
 
 static const cmdinfo_t discard_cmd = {
     .name       = "discard",
@@ -1771,7 +1764,7 @@ static const cmdinfo_t discard_cmd = {
     .help       = discard_help,
 };
 
-static int discard_f(BlockBackend *blk, int argc, char **argv)
+static int discard_f(BlockDriverState *bs, int argc, char **argv)
 {
     struct timeval t1, t2;
     int Cflag = 0, qflag = 0;
@@ -1810,8 +1803,8 @@ static int discard_f(BlockBackend *blk, int argc, char **argv)
     }
 
     gettimeofday(&t1, NULL);
-    ret = blk_discard(blk, offset >> BDRV_SECTOR_BITS,
-                      count >> BDRV_SECTOR_BITS);
+    ret = bdrv_discard(bs, offset >> BDRV_SECTOR_BITS,
+                       count >> BDRV_SECTOR_BITS);
     gettimeofday(&t2, NULL);
 
     if (ret < 0) {
@@ -1829,9 +1822,8 @@ out:
     return 0;
 }
 
-static int alloc_f(BlockBackend *blk, int argc, char **argv)
+static int alloc_f(BlockDriverState *bs, int argc, char **argv)
 {
-    BlockDriverState *bs = blk_bs(blk);
     int64_t offset, sector_num;
     int nb_sectors, remaining;
     char s1[64];
@@ -1917,7 +1909,7 @@ static int map_is_allocated(BlockDriverState *bs, int64_t sector_num,
 
         num_checked = MIN(nb_sectors, INT_MAX);
         ret = bdrv_is_allocated(bs, sector_num, num_checked, &num);
-        if (ret == firstret && num) {
+        if (ret == firstret) {
             *pnum += num;
         } else {
             break;
@@ -1927,32 +1919,22 @@ static int map_is_allocated(BlockDriverState *bs, int64_t sector_num,
     return firstret;
 }
 
-static int map_f(BlockBackend *blk, int argc, char **argv)
+static int map_f(BlockDriverState *bs, int argc, char **argv)
 {
     int64_t offset;
-    int64_t nb_sectors, total_sectors;
+    int64_t nb_sectors;
     char s1[64];
     int64_t num;
     int ret;
     const char *retstr;
 
     offset = 0;
-    total_sectors = blk_nb_sectors(blk);
-    if (total_sectors < 0) {
-        error_report("Failed to query image length: %s",
-                     strerror(-total_sectors));
-        return 0;
-    }
-
-    nb_sectors = total_sectors;
+    nb_sectors = bs->total_sectors;
 
     do {
-        ret = map_is_allocated(blk_bs(blk), offset, nb_sectors, &num);
+        ret = map_is_allocated(bs, offset, nb_sectors, &num);
         if (ret < 0) {
             error_report("Failed to get allocation status: %s", strerror(-ret));
-            return 0;
-        } else if (!num) {
-            error_report("Unexpected end of image");
             return 0;
         }
 
@@ -1964,7 +1946,7 @@ static int map_f(BlockBackend *blk, int argc, char **argv)
 
         offset += num;
         nb_sectors -= num;
-    } while (offset < total_sectors);
+    } while (offset < bs->total_sectors);
 
     return 0;
 }
@@ -1978,11 +1960,11 @@ static const cmdinfo_t map_cmd = {
        .oneline        = "prints the allocated areas of a file",
 };
 
-static int break_f(BlockBackend *blk, int argc, char **argv)
+static int break_f(BlockDriverState *bs, int argc, char **argv)
 {
     int ret;
 
-    ret = bdrv_debug_breakpoint(blk_bs(blk), argv[1], argv[2]);
+    ret = bdrv_debug_breakpoint(bs, argv[1], argv[2]);
     if (ret < 0) {
         printf("Could not set breakpoint: %s\n", strerror(-ret));
     }
@@ -1990,11 +1972,11 @@ static int break_f(BlockBackend *blk, int argc, char **argv)
     return 0;
 }
 
-static int remove_break_f(BlockBackend *blk, int argc, char **argv)
+static int remove_break_f(BlockDriverState *bs, int argc, char **argv)
 {
     int ret;
 
-    ret = bdrv_debug_remove_breakpoint(blk_bs(blk), argv[1]);
+    ret = bdrv_debug_remove_breakpoint(bs, argv[1]);
     if (ret < 0) {
         printf("Could not remove breakpoint %s: %s\n", argv[1], strerror(-ret));
     }
@@ -2021,11 +2003,11 @@ static const cmdinfo_t remove_break_cmd = {
        .oneline        = "remove a breakpoint by tag",
 };
 
-static int resume_f(BlockBackend *blk, int argc, char **argv)
+static int resume_f(BlockDriverState *bs, int argc, char **argv)
 {
     int ret;
 
-    ret = bdrv_debug_resume(blk_bs(blk), argv[1]);
+    ret = bdrv_debug_resume(bs, argv[1]);
     if (ret < 0) {
         printf("Could not resume request: %s\n", strerror(-ret));
     }
@@ -2042,10 +2024,10 @@ static const cmdinfo_t resume_cmd = {
        .oneline        = "resumes the request tagged as tag",
 };
 
-static int wait_break_f(BlockBackend *blk, int argc, char **argv)
+static int wait_break_f(BlockDriverState *bs, int argc, char **argv)
 {
-    while (!bdrv_debug_is_suspended(blk_bs(blk), argv[1])) {
-        aio_poll(blk_get_aio_context(blk), true);
+    while (!bdrv_debug_is_suspended(bs, argv[1])) {
+        qemu_aio_wait();
     }
 
     return 0;
@@ -2060,7 +2042,7 @@ static const cmdinfo_t wait_break_cmd = {
        .oneline        = "waits for the suspension of a request",
 };
 
-static int abort_f(BlockBackend *blk, int argc, char **argv)
+static int abort_f(BlockDriverState *bs, int argc, char **argv)
 {
     abort();
 }
@@ -2072,58 +2054,13 @@ static const cmdinfo_t abort_cmd = {
        .oneline        = "simulate a program crash using abort(3)",
 };
 
-static void sigraise_help(void)
-{
-    printf(
-"\n"
-" raises the given signal\n"
-"\n"
-" Example:\n"
-" 'sigraise %i' - raises SIGTERM\n"
-"\n"
-" Invokes raise(signal), where \"signal\" is the mandatory integer argument\n"
-" given to sigraise.\n"
-"\n", SIGTERM);
-}
-
-static int sigraise_f(BlockBackend *blk, int argc, char **argv);
-
-static const cmdinfo_t sigraise_cmd = {
-    .name       = "sigraise",
-    .cfunc      = sigraise_f,
-    .argmin     = 1,
-    .argmax     = 1,
-    .flags      = CMD_NOFILE_OK,
-    .args       = "signal",
-    .oneline    = "raises a signal",
-    .help       = sigraise_help,
-};
-
-static int sigraise_f(BlockBackend *blk, int argc, char **argv)
-{
-    int sig = cvtnum(argv[1]);
-    if (sig < 0) {
-        printf("non-numeric signal number argument -- %s\n", argv[1]);
-        return 0;
-    }
-
-    /* Using raise() to kill this process does not necessarily flush all open
-     * streams. At least stdout and stderr (although the latter should be
-     * non-buffered anyway) should be flushed, though. */
-    fflush(stdout);
-    fflush(stderr);
-
-    raise(sig);
-    return 0;
-}
-
 static void sleep_cb(void *opaque)
 {
     bool *expired = opaque;
     *expired = true;
 }
 
-static int sleep_f(BlockBackend *blk, int argc, char **argv)
+static int sleep_f(BlockDriverState *bs, int argc, char **argv)
 {
     char *endptr;
     long ms;
@@ -2192,7 +2129,7 @@ static void help_all(void)
     printf("\nUse 'help commandname' for extended help.\n");
 }
 
-static int help_f(BlockBackend *blk, int argc, char **argv)
+static int help_f(BlockDriverState *bs, int argc, char **argv)
 {
     const cmdinfo_t *ct;
 
@@ -2222,7 +2159,7 @@ static const cmdinfo_t help_cmd = {
     .oneline    = "help for one or all commands",
 };
 
-bool qemuio_command(BlockBackend *blk, const char *cmd)
+bool qemuio_command(BlockDriverState *bs, const char *cmd)
 {
     char *input;
     const cmdinfo_t *ct;
@@ -2235,7 +2172,7 @@ bool qemuio_command(BlockBackend *blk, const char *cmd)
     if (c) {
         ct = find_command(v[0]);
         if (ct) {
-            done = command(blk, ct, c, v);
+            done = command(bs, ct, c, v);
         } else {
             fprintf(stderr, "command \"%s\" not found\n", v[0]);
         }
@@ -2271,5 +2208,4 @@ static void __attribute((constructor)) init_qemuio_commands(void)
     qemuio_add_command(&wait_break_cmd);
     qemuio_add_command(&abort_cmd);
     qemuio_add_command(&sleep_cmd);
-    qemuio_add_command(&sigraise_cmd);
 }

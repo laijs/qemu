@@ -26,15 +26,12 @@
 #include "cpu.h"
 #include "disas/disas.h"
 #include "tcg-op.h"
-#include "exec/helper-proto.h"
+#include "helper.h"
 #include "mmu.h"
-#include "exec/cpu_ldst.h"
 #include "crisv32-decode.h"
 
-#include "exec/helper-gen.h"
-
-#include "trace-tcg.h"
-
+#define GEN_HELPER 1
+#include "helper.h"
 
 #define DISAS_CRIS 0
 #if DISAS_CRIS
@@ -163,13 +160,45 @@ static int preg_sizes[] = {
 };
 
 #define t_gen_mov_TN_env(tn, member) \
-    tcg_gen_ld_tl(tn, cpu_env, offsetof(CPUCRISState, member))
+ _t_gen_mov_TN_env((tn), offsetof(CPUCRISState, member))
 #define t_gen_mov_env_TN(member, tn) \
-    tcg_gen_st_tl(tn, cpu_env, offsetof(CPUCRISState, member))
+ _t_gen_mov_env_TN(offsetof(CPUCRISState, member), (tn))
+
+static inline void t_gen_mov_TN_reg(TCGv tn, int r)
+{
+    if (r < 0 || r > 15) {
+        fprintf(stderr, "wrong register read $r%d\n", r);
+    }
+    tcg_gen_mov_tl(tn, cpu_R[r]);
+}
+static inline void t_gen_mov_reg_TN(int r, TCGv tn)
+{
+    if (r < 0 || r > 15) {
+        fprintf(stderr, "wrong register write $r%d\n", r);
+    }
+    tcg_gen_mov_tl(cpu_R[r], tn);
+}
+
+static inline void _t_gen_mov_TN_env(TCGv tn, int offset)
+{
+    if (offset > sizeof(CPUCRISState)) {
+        fprintf(stderr, "wrong load from env from off=%d\n", offset);
+    }
+    tcg_gen_ld_tl(tn, cpu_env, offset);
+}
+static inline void _t_gen_mov_env_TN(int offset, TCGv tn)
+{
+    if (offset > sizeof(CPUCRISState)) {
+        fprintf(stderr, "wrong store to env at off=%d\n", offset);
+    }
+    tcg_gen_st_tl(tn, cpu_env, offset);
+}
 
 static inline void t_gen_mov_TN_preg(TCGv tn, int r)
 {
-    assert(r >= 0 && r <= 15);
+    if (r < 0 || r > 15) {
+        fprintf(stderr, "wrong register read $p%d\n", r);
+    }
     if (r == PR_BZ || r == PR_WZ || r == PR_DZ) {
         tcg_gen_mov_tl(tn, tcg_const_tl(0));
     } else if (r == PR_VR) {
@@ -180,7 +209,9 @@ static inline void t_gen_mov_TN_preg(TCGv tn, int r)
 }
 static inline void t_gen_mov_preg_TN(DisasContext *dc, int r, TCGv tn)
 {
-    assert(r >= 0 && r <= 15);
+    if (r < 0 || r > 15) {
+        fprintf(stderr, "wrong register write $p%d\n", r);
+    }
     if (r == PR_BZ || r == PR_WZ || r == PR_DZ) {
         return;
     } else if (r == PR_SRS) {
@@ -1781,7 +1812,7 @@ static int dec_swap_r(CPUCRISState *env, DisasContext *dc)
 
     cris_cc_mask(dc, CC_MASK_NZ);
     t0 = tcg_temp_new();
-    tcg_gen_mov_tl(t0, cpu_R[dc->op1]);
+    t_gen_mov_TN_reg(t0, dc->op1);
     if (dc->op2 & 8) {
         tcg_gen_not_tl(t0, t0);
     }
@@ -2089,7 +2120,7 @@ static int dec_move_rp(CPUCRISState *env, DisasContext *dc)
     t[0] = tcg_temp_new();
     if (dc->op2 == PR_CCS) {
         cris_evaluate_flags(dc);
-        tcg_gen_mov_tl(t[0], cpu_R[dc->op1]);
+        t_gen_mov_TN_reg(t[0], dc->op1);
         if (dc->tb_flags & U_FLAG) {
             t[1] = tcg_temp_new();
             /* User space is not allowed to touch all flags.  */
@@ -2099,7 +2130,7 @@ static int dec_move_rp(CPUCRISState *env, DisasContext *dc)
             tcg_temp_free(t[1]);
         }
     } else {
-        tcg_gen_mov_tl(t[0], cpu_R[dc->op1]);
+        t_gen_mov_TN_reg(t[0], dc->op1);
     }
 
     t_gen_mov_preg_TN(dc, dc->op2, t[0]);
@@ -3116,6 +3147,7 @@ gen_intermediate_code_internal(CRISCPU *cpu, TranslationBlock *tb,
 {
     CPUState *cs = CPU(cpu);
     CPUCRISState *env = &cpu->env;
+    uint16_t *gen_opc_end;
     uint32_t pc_start;
     unsigned int insn_len;
     int j, lj;
@@ -3140,6 +3172,8 @@ gen_intermediate_code_internal(CRISCPU *cpu, TranslationBlock *tb,
     pc_start = tb->pc & ~1;
     dc->cpu = cpu;
     dc->tb = tb;
+
+    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
 
     dc->is_jmp = DISAS_NEXT;
     dc->ppc = pc_start;
@@ -3199,12 +3233,12 @@ gen_intermediate_code_internal(CRISCPU *cpu, TranslationBlock *tb,
         max_insns = CF_COUNT_MASK;
     }
 
-    gen_tb_start(tb);
+    gen_tb_start();
     do {
         check_breakpoint(env, dc);
 
         if (search_pc) {
-            j = tcg_op_buf_count();
+            j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
             if (lj < j) {
                 lj++;
                 while (lj < j) {
@@ -3288,7 +3322,7 @@ gen_intermediate_code_internal(CRISCPU *cpu, TranslationBlock *tb,
             break;
         }
     } while (!dc->is_jmp && !dc->cpustate_changed
-            && !tcg_op_buf_full()
+            && tcg_ctx.gen_opc_ptr < gen_opc_end
             && !singlestep
             && (dc->pc < next_page_start)
             && num_insns < max_insns);
@@ -3341,9 +3375,9 @@ gen_intermediate_code_internal(CRISCPU *cpu, TranslationBlock *tb,
         }
     }
     gen_tb_end(tb, num_insns);
-
+    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
     if (search_pc) {
-        j = tcg_op_buf_count();
+        j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
         lj++;
         while (lj <= j) {
             tcg_ctx.gen_opc_instr_start[lj++] = 0;
@@ -3358,8 +3392,8 @@ gen_intermediate_code_internal(CRISCPU *cpu, TranslationBlock *tb,
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
         log_target_disas(env, pc_start, dc->pc - pc_start,
                          env->pregs[PR_VR]);
-        qemu_log("\nisize=%d osize=%d\n",
-                 dc->pc - pc_start, tcg_op_buf_count());
+        qemu_log("\nisize=%d osize=%td\n",
+            dc->pc - pc_start, tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf);
     }
 #endif
 #endif

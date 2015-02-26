@@ -24,7 +24,7 @@
  */
 #include "hw/hw.h"
 #include "hw/sysbus.h"
-#include "sysemu/block-backend.h"
+#include "block/block.h"
 #include "sysemu/dma.h"
 
 #include <hw/ide/internal.h>
@@ -82,7 +82,7 @@ static void mmio_ide_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps mmio_ide_ops = {
     .read = mmio_ide_read,
     .write = mmio_ide_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static uint64_t mmio_ide_status_read(void *opaque, hwaddr addr,
@@ -102,14 +102,15 @@ static void mmio_ide_cmd_write(void *opaque, hwaddr addr,
 static const MemoryRegionOps mmio_ide_cs_ops = {
     .read = mmio_ide_status_read,
     .write = mmio_ide_cmd_write,
-    .endianness = DEVICE_LITTLE_ENDIAN,
+    .endianness = DEVICE_NATIVE_ENDIAN,
 };
 
 static const VMStateDescription vmstate_ide_mmio = {
     .name = "mmio-ide",
     .version_id = 3,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .minimum_version_id_old = 0,
+    .fields      = (VMStateField []) {
         VMSTATE_IDE_BUS(bus, MMIOState),
         VMSTATE_IDE_DRIVES(bus.ifs, MMIOState),
         VMSTATE_END_OF_LIST()

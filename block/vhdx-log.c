@@ -84,7 +84,6 @@ static int vhdx_log_peek_hdr(BlockDriverState *bs, VHDXLogEntries *log,
     if (ret < 0) {
         goto exit;
     }
-    vhdx_log_entry_hdr_le_import(hdr);
 
 exit:
     return ret;
@@ -212,7 +211,7 @@ static bool vhdx_log_hdr_is_valid(VHDXLogEntries *log, VHDXLogEntryHeader *hdr,
 {
     int valid = false;
 
-    if (hdr->signature != VHDX_LOG_SIGNATURE) {
+    if (memcmp(&hdr->signature, "loge", 4)) {
         goto exit;
     }
 
@@ -276,12 +275,12 @@ static bool vhdx_log_desc_is_valid(VHDXLogDescriptor *desc,
         goto exit;
     }
 
-    if (desc->signature == VHDX_LOG_ZERO_SIGNATURE) {
+    if (!memcmp(&desc->signature, "zero", 4)) {
         if (desc->zero_length % VHDX_LOG_SECTOR_SIZE == 0) {
             /* valid */
             ret = true;
         }
-    } else if (desc->signature == VHDX_LOG_DESC_SIGNATURE) {
+    } else if (!memcmp(&desc->signature, "desc", 4)) {
             /* valid */
             ret = true;
     }
@@ -328,15 +327,13 @@ static int vhdx_compute_desc_sectors(uint32_t desc_cnt)
  * passed into this function. Each descriptor will also be validated,
  * and error returned if any are invalid. */
 static int vhdx_log_read_desc(BlockDriverState *bs, BDRVVHDXState *s,
-                              VHDXLogEntries *log, VHDXLogDescEntries **buffer,
-                              bool convert_endian)
+                              VHDXLogEntries *log, VHDXLogDescEntries **buffer)
 {
     int ret = 0;
     uint32_t desc_sectors;
     uint32_t sectors_read;
     VHDXLogEntryHeader hdr;
     VHDXLogDescEntries *desc_entries = NULL;
-    VHDXLogDescriptor desc;
     int i;
 
     assert(*buffer == NULL);
@@ -345,19 +342,14 @@ static int vhdx_log_read_desc(BlockDriverState *bs, BDRVVHDXState *s,
     if (ret < 0) {
         goto exit;
     }
-
+    vhdx_log_entry_hdr_le_import(&hdr);
     if (vhdx_log_hdr_is_valid(log, &hdr, s) == false) {
         ret = -EINVAL;
         goto exit;
     }
 
     desc_sectors = vhdx_compute_desc_sectors(hdr.descriptor_count);
-    desc_entries = qemu_try_blockalign(bs->file,
-                                       desc_sectors * VHDX_LOG_SECTOR_SIZE);
-    if (desc_entries == NULL) {
-        ret = -ENOMEM;
-        goto exit;
-    }
+    desc_entries = qemu_blockalign(bs, desc_sectors * VHDX_LOG_SECTOR_SIZE);
 
     ret = vhdx_log_read_sectors(bs, log, &sectors_read, desc_entries,
                                 desc_sectors, false);
@@ -371,18 +363,11 @@ static int vhdx_log_read_desc(BlockDriverState *bs, BDRVVHDXState *s,
 
     /* put in proper endianness, and validate each desc */
     for (i = 0; i < hdr.descriptor_count; i++) {
-        desc = desc_entries->desc[i];
-        vhdx_log_desc_le_import(&desc);
-        if (convert_endian) {
-            desc_entries->desc[i] = desc;
-        }
-        if (vhdx_log_desc_is_valid(&desc, &hdr) == false) {
+        vhdx_log_desc_le_import(&desc_entries->desc[i]);
+        if (vhdx_log_desc_is_valid(&desc_entries->desc[i], &hdr) == false) {
             ret = -EINVAL;
             goto free_and_exit;
         }
-    }
-    if (convert_endian) {
-        desc_entries->hdr = hdr;
     }
 
     *buffer = desc_entries;
@@ -418,7 +403,7 @@ static int vhdx_log_flush_desc(BlockDriverState *bs, VHDXLogDescriptor *desc,
 
     buffer = qemu_blockalign(bs, VHDX_LOG_SECTOR_SIZE);
 
-    if (desc->signature == VHDX_LOG_DESC_SIGNATURE) {
+    if (!memcmp(&desc->signature, "desc", 4)) {
         /* data sector */
         if (data == NULL) {
             ret = -EFAULT;
@@ -446,15 +431,10 @@ static int vhdx_log_flush_desc(BlockDriverState *bs, VHDXLogDescriptor *desc,
 
         memcpy(buffer+offset, &desc->trailing_bytes, 4);
 
-    } else if (desc->signature == VHDX_LOG_ZERO_SIGNATURE) {
+    } else if (!memcmp(&desc->signature, "zero", 4)) {
         /* write 'count' sectors of sector */
         memset(buffer, 0, VHDX_LOG_SECTOR_SIZE);
         count = desc->zero_length / VHDX_LOG_SECTOR_SIZE;
-    } else {
-        error_report("Invalid VHDX log descriptor entry signature 0x%" PRIx32,
-                      desc->signature);
-        ret = -EINVAL;
-        goto exit;
     }
 
     file_offset = desc->file_offset;
@@ -513,13 +493,13 @@ static int vhdx_log_flush(BlockDriverState *bs, BDRVVHDXState *s,
             goto exit;
         }
 
-        ret = vhdx_log_read_desc(bs, s, &logs->log, &desc_entries, true);
+        ret = vhdx_log_read_desc(bs, s, &logs->log, &desc_entries);
         if (ret < 0) {
             goto exit;
         }
 
         for (i = 0; i < desc_entries->hdr.descriptor_count; i++) {
-            if (desc_entries->desc[i].signature == VHDX_LOG_DESC_SIGNATURE) {
+            if (!memcmp(&desc_entries->desc[i].signature, "desc", 4)) {
                 /* data sector, so read a sector to flush */
                 ret = vhdx_log_read_sectors(bs, &logs->log, &sectors_read,
                                             data, 1, false);
@@ -530,7 +510,6 @@ static int vhdx_log_flush(BlockDriverState *bs, BDRVVHDXState *s,
                     ret = -EINVAL;
                     goto exit;
                 }
-                vhdx_log_data_le_import(data);
             }
 
             ret = vhdx_log_flush_desc(bs, &desc_entries->desc[i], data);
@@ -579,6 +558,9 @@ static int vhdx_validate_log_entry(BlockDriverState *bs, BDRVVHDXState *s,
         goto inc_and_exit;
     }
 
+    vhdx_log_entry_hdr_le_import(&hdr);
+
+
     if (vhdx_log_hdr_is_valid(log, &hdr, s) == false) {
         goto inc_and_exit;
     }
@@ -591,13 +573,13 @@ static int vhdx_validate_log_entry(BlockDriverState *bs, BDRVVHDXState *s,
 
     desc_sectors = vhdx_compute_desc_sectors(hdr.descriptor_count);
 
-    /* Read all log sectors, and calculate log checksum */
+    /* Read desc sectors, and calculate log checksum */
 
     total_sectors = hdr.entry_length / VHDX_LOG_SECTOR_SIZE;
 
 
     /* read_desc() will increment the read idx */
-    ret = vhdx_log_read_desc(bs, s, log, &desc_buffer, false);
+    ret = vhdx_log_read_desc(bs, s, log, &desc_buffer);
     if (ret < 0) {
         goto free_and_exit;
     }
@@ -620,7 +602,7 @@ static int vhdx_validate_log_entry(BlockDriverState *bs, BDRVVHDXState *s,
         }
     }
     crc ^= 0xffffffff;
-    if (crc != hdr.checksum) {
+    if (crc != desc_buffer->hdr.checksum) {
         goto free_and_exit;
     }
 
@@ -923,7 +905,7 @@ static int vhdx_log_write(BlockDriverState *bs, BDRVVHDXState *s,
     buffer = qemu_blockalign(bs, total_length);
     memcpy(buffer, &new_hdr, sizeof(new_hdr));
 
-    new_desc = buffer + sizeof(new_hdr);
+    new_desc = (VHDXLogDescriptor *) (buffer + sizeof(new_hdr));
     data_sector = buffer + (desc_sectors * VHDX_LOG_SECTOR_SIZE);
     data_tmp = data;
 
@@ -980,6 +962,7 @@ static int vhdx_log_write(BlockDriverState *bs, BDRVVHDXState *s,
      * last data sector */
     vhdx_update_checksum(buffer, total_length,
                          offsetof(VHDXLogEntryHeader, checksum));
+    cpu_to_le32s((uint32_t *)(buffer + 4));
 
     /* now write to the log */
     ret = vhdx_log_write_sectors(bs, &s->log, &sectors_written, buffer,

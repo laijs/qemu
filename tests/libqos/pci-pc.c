@@ -20,9 +20,6 @@
 
 #include <glib.h>
 
-#define ACPI_PCIHP_ADDR         0xae00
-#define PCI_EJ_BASE             0x0008
-
 typedef struct QPCIBusPC
 {
     QPCIBus bus;
@@ -44,7 +41,7 @@ static uint8_t qpci_pc_io_readb(QPCIBus *bus, void *addr)
     if (port < 0x10000) {
         value = inb(port);
     } else {
-        value = readb(port);
+        memread(port, &value, sizeof(value));
     }
 
     return value;
@@ -58,7 +55,7 @@ static uint16_t qpci_pc_io_readw(QPCIBus *bus, void *addr)
     if (port < 0x10000) {
         value = inw(port);
     } else {
-        value = readw(port);
+        memread(port, &value, sizeof(value));
     }
 
     return value;
@@ -72,7 +69,7 @@ static uint32_t qpci_pc_io_readl(QPCIBus *bus, void *addr)
     if (port < 0x10000) {
         value = inl(port);
     } else {
-        value = readl(port);
+        memread(port, &value, sizeof(value));
     }
 
     return value;
@@ -85,7 +82,7 @@ static void qpci_pc_io_writeb(QPCIBus *bus, void *addr, uint8_t value)
     if (port < 0x10000) {
         outb(port, value);
     } else {
-        writeb(port, value);
+        memwrite(port, &value, sizeof(value));
     }
 }
 
@@ -96,7 +93,7 @@ static void qpci_pc_io_writew(QPCIBus *bus, void *addr, uint16_t value)
     if (port < 0x10000) {
         outw(port, value);
     } else {
-        writew(port, value);
+        memwrite(port, &value, sizeof(value));
     }
 }
 
@@ -107,7 +104,7 @@ static void qpci_pc_io_writel(QPCIBus *bus, void *addr, uint32_t value)
     if (port < 0x10000) {
         outl(port, value);
     } else {
-        writel(port, value);
+        memwrite(port, &value, sizeof(value));
     }
 }
 
@@ -147,7 +144,7 @@ static void qpci_pc_config_writel(QPCIBus *bus, int devfn, uint8_t offset, uint3
     outl(0xcfc, value);
 }
 
-static void *qpci_pc_iomap(QPCIBus *bus, QPCIDevice *dev, int barno, uint64_t *sizeptr)
+static void *qpci_pc_iomap(QPCIBus *bus, QPCIDevice *dev, int barno)
 {
     QPCIBusPC *s = container_of(bus, QPCIBusPC, bus);
     static const int bar_reg_map[] = {
@@ -175,9 +172,6 @@ static void *qpci_pc_iomap(QPCIBus *bus, QPCIDevice *dev, int barno, uint64_t *s
     size = (1ULL << ctzl(addr));
     if (size == 0) {
         return NULL;
-    }
-    if (sizeptr) {
-        *sizeptr = size;
     }
 
     if (io_type == PCI_BASE_ADDRESS_SPACE_IO) {
@@ -242,57 +236,4 @@ QPCIBus *qpci_init_pc(void)
     ret->pci_iohole_alloc = 0;
 
     return &ret->bus;
-}
-
-void qpci_free_pc(QPCIBus *bus)
-{
-    QPCIBusPC *s = container_of(bus, QPCIBusPC, bus);
-
-    g_free(s);
-}
-
-void qpci_plug_device_test(const char *driver, const char *id,
-                           uint8_t slot, const char *opts)
-{
-    QDict *response;
-    char *cmd;
-
-    cmd = g_strdup_printf("{'execute': 'device_add',"
-                          " 'arguments': {"
-                          "   'driver': '%s',"
-                          "   'addr': '%d',"
-                          "   %s%s"
-                          "   'id': '%s'"
-                          "}}", driver, slot,
-                          opts ? opts : "", opts ? "," : "",
-                          id);
-    response = qmp(cmd);
-    g_free(cmd);
-    g_assert(response);
-    g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
-}
-
-void qpci_unplug_acpi_device_test(const char *id, uint8_t slot)
-{
-    QDict *response;
-    char *cmd;
-
-    cmd = g_strdup_printf("{'execute': 'device_del',"
-                          " 'arguments': {"
-                          "   'id': '%s'"
-                          "}}", id);
-    response = qmp(cmd);
-    g_free(cmd);
-    g_assert(response);
-    g_assert(!qdict_haskey(response, "error"));
-    QDECREF(response);
-
-    outb(ACPI_PCIHP_ADDR + PCI_EJ_BASE, 1 << slot);
-
-    response = qmp("");
-    g_assert(response);
-    g_assert(qdict_haskey(response, "event"));
-    g_assert(!strcmp(qdict_get_str(response, "event"), "DEVICE_DELETED"));
-    QDECREF(response);
 }

@@ -15,7 +15,6 @@
 #include "net/net.h"
 #include "exec/address-spaces.h"
 #include "sysemu/sysemu.h"
-#include "qemu/error-report.h"
 
 #define TYPE_INTEGRATOR_CM "integrator_core"
 #define INTEGRATOR_CM(obj) \
@@ -265,8 +264,7 @@ static int integratorcm_init(SysBusDevice *dev)
     s->cm_init = 0x00000112;
     s->cm_refcnt_offset = muldiv64(qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL), 24,
                                    1000);
-    memory_region_init_ram(&s->flash, OBJECT(s), "integrator.flash", 0x100000,
-                           &error_abort);
+    memory_region_init_ram(&s->flash, OBJECT(s), "integrator.flash", 0x100000);
     vmstate_register_ram_global(&s->flash);
 
     memory_region_init_io(&s->iomem, OBJECT(s), &integratorcm_ops, s,
@@ -463,15 +461,13 @@ static struct arm_boot_info integrator_binfo = {
     .board_id = 0x113,
 };
 
-static void integratorcp_init(MachineState *machine)
+static void integratorcp_init(QEMUMachineInitArgs *args)
 {
-    ram_addr_t ram_size = machine->ram_size;
-    const char *cpu_model = machine->cpu_model;
-    const char *kernel_filename = machine->kernel_filename;
-    const char *kernel_cmdline = machine->kernel_cmdline;
-    const char *initrd_filename = machine->initrd_filename;
-    ObjectClass *cpu_oc;
-    Object *cpuobj;
+    ram_addr_t ram_size = args->ram_size;
+    const char *cpu_model = args->cpu_model;
+    const char *kernel_filename = args->kernel_filename;
+    const char *kernel_cmdline = args->kernel_cmdline;
+    const char *initrd_filename = args->initrd_filename;
     ARMCPU *cpu;
     MemoryRegion *address_space_mem = get_system_memory();
     MemoryRegion *ram = g_new(MemoryRegion, 1);
@@ -479,41 +475,17 @@ static void integratorcp_init(MachineState *machine)
     qemu_irq pic[32];
     DeviceState *dev;
     int i;
-    Error *err = NULL;
 
     if (!cpu_model) {
         cpu_model = "arm926";
     }
-
-    cpu_oc = cpu_class_by_name(TYPE_ARM_CPU, cpu_model);
-    if (!cpu_oc) {
+    cpu = cpu_arm_init(cpu_model);
+    if (!cpu) {
         fprintf(stderr, "Unable to find CPU definition\n");
         exit(1);
     }
 
-    cpuobj = object_new(object_class_get_name(cpu_oc));
-
-    /* By default ARM1176 CPUs have EL3 enabled.  This board does not
-     * currently support EL3 so the CPU EL3 property is disabled before
-     * realization.
-     */
-    if (object_property_find(cpuobj, "has_el3", NULL)) {
-        object_property_set_bool(cpuobj, false, "has_el3", &err);
-        if (err) {
-            error_report("%s", error_get_pretty(err));
-            exit(1);
-        }
-    }
-
-    object_property_set_bool(cpuobj, true, "realized", &err);
-    if (err) {
-        error_report("%s", error_get_pretty(err));
-        exit(1);
-    }
-
-    cpu = ARM_CPU(cpuobj);
-
-    memory_region_init_ram(ram, NULL, "integrator.ram", ram_size, &error_abort);
+    memory_region_init_ram(ram, NULL, "integrator.ram", ram_size);
     vmstate_register_ram_global(ram);
     /* ??? On a real system the first 1Mb is mapped as SSRAM or boot flash.  */
     /* ??? RAM should repeat to fill physical memory space.  */

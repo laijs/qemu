@@ -20,8 +20,6 @@ typedef struct DisasContext {
 #if !defined(CONFIG_USER_ONLY)
     int user;
 #endif
-    ARMMMUIdx mmu_idx; /* MMU index to use for normal loads/stores */
-    bool ns;        /* Use non-secure CPREG bank on access */
     bool cpacr_fpen; /* FP enabled via CPACR.FPEN */
     bool vfp_enabled; /* FP enabled via FPSCR.EN */
     int vec_len;
@@ -31,7 +29,7 @@ typedef struct DisasContext {
      */
     uint32_t svc_imm;
     int aarch64;
-    int current_el;
+    int current_pl;
     GHashTable *cp_regs;
     uint64_t features; /* CPU features bits */
     /* Because unallocated encodings generate different exception syndrome
@@ -42,20 +40,6 @@ typedef struct DisasContext {
      * that it is set at the point where we actually touch the FP regs.
      */
     bool fp_access_checked;
-    /* ARMv8 single-step state (this is distinct from the QEMU gdbstub
-     * single-step support).
-     */
-    bool ss_active;
-    bool pstate_ss;
-    /* True if the insn just emitted was a load-exclusive instruction
-     * (necessary for syndrome information for single step exceptions),
-     * ie A64 LDX*, LDAX*, A32/T32 LDREX*, LDAEX*.
-     */
-    bool is_ldex;
-    /* True if a single-step exception will be taken to the current EL */
-    bool ss_same_el;
-    /* Bottom two bits of XScale c15_cpar coprocessor access control reg */
-    int c15_cpar;
 #define TMP_A64_MAX 16
     int tmp_a64_count;
     TCGv_i64 tmp_a64[TMP_A64_MAX];
@@ -66,11 +50,6 @@ extern TCGv_ptr cpu_env;
 static inline int arm_dc_feature(DisasContext *dc, int feature)
 {
     return (dc->features & (1ULL << feature)) != 0;
-}
-
-static inline int get_mem_index(DisasContext *s)
-{
-    return s->mmu_idx;
 }
 
 /* target-specific extra values for is_jmp */
@@ -86,8 +65,6 @@ static inline int get_mem_index(DisasContext *s)
 #define DISAS_EXC 6
 /* WFE */
 #define DISAS_WFE 7
-#define DISAS_HVC 8
-#define DISAS_SMC 9
 
 #ifdef TARGET_AARCH64
 void a64_translate_init(void);

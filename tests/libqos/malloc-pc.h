@@ -16,7 +16,5 @@
 #include "libqos/malloc.h"
 
 QGuestAllocator *pc_alloc_init(void);
-QGuestAllocator *pc_alloc_init_flags(QAllocOpts flags);
-void pc_alloc_uninit(QGuestAllocator *allocator);
 
 #endif

@@ -608,7 +608,6 @@ static void musb_packet(MUSBState *s, MUSBEndPoint *ep,
     USBDevice *dev;
     USBEndpoint *uep;
     int idx = epnum && dir;
-    int id;
     int ttype;
 
     /* ep->type[0,1] contains:
@@ -626,11 +625,8 @@ static void musb_packet(MUSBState *s, MUSBEndPoint *ep,
     /* A wild guess on the FADDR semantics... */
     dev = usb_find_device(&s->port, ep->faddr[idx]);
     uep = usb_ep_get(dev, pid, ep->type[idx] & 0xf);
-    id = pid;
-    if (uep) {
-        id |= (dev->addr << 16) | (uep->nr << 8);
-    }
-    usb_packet_setup(&ep->packey[dir].p, pid, uep, 0, id, false, true);
+    usb_packet_setup(&ep->packey[dir].p, pid, uep, 0,
+                     (dev->addr << 16) | (uep->nr << 8) | pid, false, true);
     usb_packet_addbuf(&ep->packey[dir].p, ep->buf[idx], len);
     ep->packey[dir].ep = ep;
     ep->packey[dir].dir = dir;

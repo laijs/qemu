@@ -24,12 +24,10 @@
 
 #include "block/qapi.h"
 #include "block/block_int.h"
-#include "block/write-threshold.h"
 #include "qmp-commands.h"
 #include "qapi-visit.h"
 #include "qapi/qmp-output-visitor.h"
 #include "qapi/qmp/types.h"
-#include "sysemu/block-backend.h"
 
 BlockDeviceInfo *bdrv_block_device_info(BlockDriverState *bs)
 {
@@ -40,13 +38,6 @@ BlockDeviceInfo *bdrv_block_device_info(BlockDriverState *bs)
     info->drv                    = g_strdup(bs->drv->format_name);
     info->encrypted              = bs->encrypted;
     info->encryption_key_missing = bdrv_key_required(bs);
-
-    info->cache = g_new(BlockdevCacheInfo, 1);
-    *info->cache = (BlockdevCacheInfo) {
-        .writeback      = bdrv_enable_write_cache(bs),
-        .direct         = !!(bs->open_flags & BDRV_O_NOCACHE),
-        .no_flush       = !!(bs->open_flags & BDRV_O_NO_FLUSH),
-    };
 
     if (bs->node_name[0]) {
         info->has_node_name = true;
@@ -59,7 +50,6 @@ BlockDeviceInfo *bdrv_block_device_info(BlockDriverState *bs)
     }
 
     info->backing_file_depth = bdrv_get_backing_file_depth(bs);
-    info->detect_zeroes = bs->detect_zeroes;
 
     if (bs->io_limits_enabled) {
         ThrottleConfig cfg;
@@ -89,8 +79,6 @@ BlockDeviceInfo *bdrv_block_device_info(BlockDriverState *bs)
         info->has_iops_size = cfg.op_size;
         info->iops_size = cfg.op_size;
     }
-
-    info->write_threshold = bdrv_write_threshold_get(bs);
 
     return info;
 }
@@ -176,24 +164,19 @@ void bdrv_query_image_info(BlockDriverState *bs,
                            ImageInfo **p_info,
                            Error **errp)
 {
-    int64_t size;
+    uint64_t total_sectors;
     const char *backing_filename;
+    char backing_filename2[1024];
     BlockDriverInfo bdi;
     int ret;
     Error *err = NULL;
-    ImageInfo *info;
+    ImageInfo *info = g_new0(ImageInfo, 1);
 
-    size = bdrv_getlength(bs);
-    if (size < 0) {
-        error_setg_errno(errp, -size, "Can't get size of device '%s'",
-                         bdrv_get_device_name(bs));
-        return;
-    }
+    bdrv_get_geometry(bs, &total_sectors);
 
-    info = g_new0(ImageInfo, 1);
     info->filename        = g_strdup(bs->filename);
     info->format          = g_strdup(bdrv_get_format_name(bs));
-    info->virtual_size    = size;
+    info->virtual_size    = total_sectors * 512;
     info->actual_size     = bdrv_get_allocated_file_size(bs);
     info->has_actual_size = info->actual_size >= 0;
     if (bdrv_is_encrypted(bs)) {
@@ -213,16 +196,10 @@ void bdrv_query_image_info(BlockDriverState *bs,
 
     backing_filename = bs->backing_file;
     if (backing_filename[0] != '\0') {
-        char *backing_filename2 = g_malloc0(PATH_MAX);
         info->backing_filename = g_strdup(backing_filename);
         info->has_backing_filename = true;
-        bdrv_get_full_backing_filename(bs, backing_filename2, PATH_MAX, &err);
-        if (err) {
-            error_propagate(errp, err);
-            qapi_free_ImageInfo(info);
-            g_free(backing_filename2);
-            return;
-        }
+        bdrv_get_full_backing_filename(bs, backing_filename2,
+                                       sizeof(backing_filename2));
 
         if (strcmp(backing_filename, backing_filename2) != 0) {
             info->full_backing_filename =
@@ -234,7 +211,6 @@ void bdrv_query_image_info(BlockDriverState *bs,
             info->backing_filename_format = g_strdup(bs->backing_format);
             info->has_backing_filename_format = true;
         }
-        g_free(backing_filename2);
     }
 
     ret = bdrv_query_snapshot_info_list(bs, &info->snapshots, &err);
@@ -259,22 +235,22 @@ void bdrv_query_image_info(BlockDriverState *bs,
 }
 
 /* @p_info will be set only on success. */
-static void bdrv_query_info(BlockBackend *blk, BlockInfo **p_info,
-                            Error **errp)
+void bdrv_query_info(BlockDriverState *bs,
+                     BlockInfo **p_info,
+                     Error **errp)
 {
     BlockInfo *info = g_malloc0(sizeof(*info));
-    BlockDriverState *bs = blk_bs(blk);
     BlockDriverState *bs0;
     ImageInfo **p_image_info;
     Error *local_err = NULL;
-    info->device = g_strdup(blk_name(blk));
+    info->device = g_strdup(bs->device_name);
     info->type = g_strdup("unknown");
-    info->locked = blk_dev_is_medium_locked(blk);
-    info->removable = blk_dev_has_removable_media(blk);
+    info->locked = bdrv_dev_is_medium_locked(bs);
+    info->removable = bdrv_dev_has_removable_media(bs);
 
-    if (blk_dev_has_removable_media(blk)) {
+    if (bdrv_dev_has_removable_media(bs)) {
         info->has_tray_open = true;
-        info->tray_open = blk_dev_is_tray_open(blk);
+        info->tray_open = bdrv_dev_is_tray_open(bs);
     }
 
     if (bdrv_iostatus_is_enabled(bs)) {
@@ -316,45 +292,36 @@ static void bdrv_query_info(BlockBackend *blk, BlockInfo **p_info,
     qapi_free_BlockInfo(info);
 }
 
-static BlockStats *bdrv_query_stats(const BlockDriverState *bs,
-                                    bool query_backing)
+BlockStats *bdrv_query_stats(const BlockDriverState *bs)
 {
     BlockStats *s;
 
     s = g_malloc0(sizeof(*s));
 
-    if (bdrv_get_device_name(bs)[0]) {
+    if (bs->device_name[0]) {
         s->has_device = true;
-        s->device = g_strdup(bdrv_get_device_name(bs));
-    }
-
-    if (bdrv_get_node_name(bs)[0]) {
-        s->has_node_name = true;
-        s->node_name = g_strdup(bdrv_get_node_name(bs));
+        s->device = g_strdup(bs->device_name);
     }
 
     s->stats = g_malloc0(sizeof(*s->stats));
-    s->stats->rd_bytes = bs->stats.nr_bytes[BLOCK_ACCT_READ];
-    s->stats->wr_bytes = bs->stats.nr_bytes[BLOCK_ACCT_WRITE];
-    s->stats->rd_operations = bs->stats.nr_ops[BLOCK_ACCT_READ];
-    s->stats->wr_operations = bs->stats.nr_ops[BLOCK_ACCT_WRITE];
-    s->stats->rd_merged = bs->stats.merged[BLOCK_ACCT_READ];
-    s->stats->wr_merged = bs->stats.merged[BLOCK_ACCT_WRITE];
-    s->stats->wr_highest_offset =
-        bs->stats.wr_highest_sector * BDRV_SECTOR_SIZE;
-    s->stats->flush_operations = bs->stats.nr_ops[BLOCK_ACCT_FLUSH];
-    s->stats->wr_total_time_ns = bs->stats.total_time_ns[BLOCK_ACCT_WRITE];
-    s->stats->rd_total_time_ns = bs->stats.total_time_ns[BLOCK_ACCT_READ];
-    s->stats->flush_total_time_ns = bs->stats.total_time_ns[BLOCK_ACCT_FLUSH];
+    s->stats->rd_bytes = bs->nr_bytes[BDRV_ACCT_READ];
+    s->stats->wr_bytes = bs->nr_bytes[BDRV_ACCT_WRITE];
+    s->stats->rd_operations = bs->nr_ops[BDRV_ACCT_READ];
+    s->stats->wr_operations = bs->nr_ops[BDRV_ACCT_WRITE];
+    s->stats->wr_highest_offset = bs->wr_highest_sector * BDRV_SECTOR_SIZE;
+    s->stats->flush_operations = bs->nr_ops[BDRV_ACCT_FLUSH];
+    s->stats->wr_total_time_ns = bs->total_time_ns[BDRV_ACCT_WRITE];
+    s->stats->rd_total_time_ns = bs->total_time_ns[BDRV_ACCT_READ];
+    s->stats->flush_total_time_ns = bs->total_time_ns[BDRV_ACCT_FLUSH];
 
     if (bs->file) {
         s->has_parent = true;
-        s->parent = bdrv_query_stats(bs->file, query_backing);
+        s->parent = bdrv_query_stats(bs->file);
     }
 
-    if (query_backing && bs->backing_hd) {
+    if (bs->backing_hd) {
         s->has_backing = true;
-        s->backing = bdrv_query_stats(bs->backing_hd, query_backing);
+        s->backing = bdrv_query_stats(bs->backing_hd);
     }
 
     return s;
@@ -363,12 +330,12 @@ static BlockStats *bdrv_query_stats(const BlockDriverState *bs,
 BlockInfoList *qmp_query_block(Error **errp)
 {
     BlockInfoList *head = NULL, **p_next = &head;
-    BlockBackend *blk;
+    BlockDriverState *bs = NULL;
     Error *local_err = NULL;
 
-    for (blk = blk_next(NULL); blk; blk = blk_next(blk)) {
+     while ((bs = bdrv_next(bs))) {
         BlockInfoList *info = g_malloc0(sizeof(*info));
-        bdrv_query_info(blk, &info->value, &local_err);
+        bdrv_query_info(bs, &info->value, &local_err);
         if (local_err) {
             error_propagate(errp, local_err);
             goto err;
@@ -385,23 +352,14 @@ BlockInfoList *qmp_query_block(Error **errp)
     return NULL;
 }
 
-BlockStatsList *qmp_query_blockstats(bool has_query_nodes,
-                                     bool query_nodes,
-                                     Error **errp)
+BlockStatsList *qmp_query_blockstats(Error **errp)
 {
     BlockStatsList *head = NULL, **p_next = &head;
     BlockDriverState *bs = NULL;
 
-    /* Just to be safe if query_nodes is not always initialized */
-    query_nodes = has_query_nodes && query_nodes;
-
-    while ((bs = query_nodes ? bdrv_next_node(bs) : bdrv_next(bs))) {
+     while ((bs = bdrv_next(bs))) {
         BlockStatsList *info = g_malloc0(sizeof(*info));
-        AioContext *ctx = bdrv_get_aio_context(bs);
-
-        aio_context_acquire(ctx);
-        info->value = bdrv_query_stats(bs, !query_nodes);
-        aio_context_release(ctx);
+        info->value = bdrv_query_stats(bs);
 
         *p_next = info;
         p_next = &info->next;
@@ -516,7 +474,6 @@ static void dump_qobject(fprintf_function func_fprintf, void *f,
         case QTYPE_QERROR: {
             QString *value = qerror_human((QError *)obj);
             func_fprintf(f, "%s", qstring_get_str(value));
-            QDECREF(value);
             break;
         }
         case QTYPE_NONE:
@@ -575,11 +532,12 @@ static void dump_qdict(fprintf_function func_fprintf, void *f, int indentation,
 void bdrv_image_info_specific_dump(fprintf_function func_fprintf, void *f,
                                    ImageInfoSpecific *info_spec)
 {
+    Error *local_err = NULL;
     QmpOutputVisitor *ov = qmp_output_visitor_new();
     QObject *obj, *data;
 
     visit_type_ImageInfoSpecific(qmp_output_get_visitor(ov), &info_spec, NULL,
-                                 &error_abort);
+                                 &local_err);
     obj = qmp_output_get_qobject(ov);
     assert(qobject_type(obj) == QTYPE_QDICT);
     data = qdict_get(qobject_to_qdict(obj), "data");

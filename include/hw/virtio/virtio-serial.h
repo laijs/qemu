@@ -202,10 +202,10 @@ struct VirtIOSerial {
 
     QTAILQ_HEAD(, VirtIOSerialPort) ports;
 
-    QLIST_ENTRY(VirtIOSerial) next;
-
     /* bitmap for identifying active ports */
     uint32_t *ports_map;
+
+    struct virtio_console_config config;
 
     struct VirtIOSerialPostLoad *post_load;
 

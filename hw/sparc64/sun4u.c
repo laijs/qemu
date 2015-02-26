@@ -38,7 +38,7 @@
 #include "hw/ide.h"
 #include "hw/loader.h"
 #include "elf.h"
-#include "sysemu/block-backend.h"
+#include "sysemu/blockdev.h"
 #include "exec/address-spaces.h"
 
 //#define DEBUG_IRQ
@@ -124,10 +124,10 @@ void DMA_register_channel (int nchan,
 {
 }
 
-static void fw_cfg_boot_set(void *opaque, const char *boot_device,
-                            Error **errp)
+static int fw_cfg_boot_set(void *opaque, const char *boot_device)
 {
     fw_cfg_add_i16(opaque, FW_CFG_BOOT_DEVICE, boot_device[0]);
+    return 0;
 }
 
 static int sun4u_NVRAM_set_params(M48t59State *nvram, uint16_t NVRAM_size,
@@ -596,8 +596,7 @@ pci_ebus_init1(PCIDevice *pci_dev)
 {
     EbusState *s = DO_UPCAST(EbusState, pci_dev, pci_dev);
 
-    isa_bus_new(DEVICE(pci_dev), get_system_memory(),
-                pci_address_space_io(pci_dev));
+    isa_bus_new(&pci_dev->qdev, pci_address_space_io(pci_dev));
 
     pci_dev->config[0x04] = 0x06; // command = bus master, pci mem
     pci_dev->config[0x05] = 0x00;
@@ -610,8 +609,8 @@ pci_ebus_init1(PCIDevice *pci_dev)
                              0, 0x1000000);
     pci_register_bar(pci_dev, 0, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar0);
     memory_region_init_alias(&s->bar1, OBJECT(s), "bar1", get_system_io(),
-                             0, 0x1000);
-    pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_IO, &s->bar1);
+                             0, 0x800000);
+    pci_register_bar(pci_dev, 1, PCI_BASE_ADDRESS_SPACE_MEMORY, &s->bar1);
     return 0;
 }
 
@@ -687,8 +686,7 @@ static int prom_init1(SysBusDevice *dev)
 {
     PROMState *s = OPENPROM(dev);
 
-    memory_region_init_ram(&s->prom, OBJECT(s), "sun4u.prom", PROM_SIZE_MAX,
-                           &error_abort);
+    memory_region_init_ram(&s->prom, OBJECT(s), "sun4u.prom", PROM_SIZE_MAX);
     vmstate_register_ram_global(&s->prom);
     memory_region_set_readonly(&s->prom, true);
     sysbus_init_mmio(dev, &s->prom);
@@ -731,8 +729,7 @@ static int ram_init1(SysBusDevice *dev)
 {
     RamDevice *d = SUN4U_RAM(dev);
 
-    memory_region_init_ram(&d->ram, OBJECT(d), "sun4u.ram", d->size,
-                           &error_abort);
+    memory_region_init_ram(&d->ram, OBJECT(d), "sun4u.ram", d->size);
     vmstate_register_ram_global(&d->ram);
     sysbus_init_mmio(dev, &d->ram);
     return 0;
@@ -814,7 +811,7 @@ static SPARCCPU *cpu_devinit(const char *cpu_model, const struct hwdef *hwdef)
 }
 
 static void sun4uv_init(MemoryRegion *address_space_mem,
-                        MachineState *machine,
+                        QEMUMachineInitArgs *args,
                         const struct hwdef *hwdef)
 {
     SPARCCPU *cpu;
@@ -829,10 +826,10 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     FWCfgState *fw_cfg;
 
     /* init CPUs */
-    cpu = cpu_devinit(machine->cpu_model, hwdef);
+    cpu = cpu_devinit(args->cpu_model, hwdef);
 
     /* set up devices */
-    ram_init(0, machine->ram_size);
+    ram_init(0, args->ram_size);
 
     prom_init(hwdef->prom_addr, bios_name);
 
@@ -865,7 +862,7 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
     for(i = 0; i < nb_nics; i++)
         pci_nic_init_nofail(&nd_table[i], pci_bus, "ne2k_pci", NULL);
 
-    ide_drive_get(hd, ARRAY_SIZE(hd));
+    ide_drive_get(hd, MAX_IDE_BUS);
 
     pci_cmd646_ide_init(pci_bus, hd, 1);
 
@@ -878,38 +875,38 @@ static void sun4uv_init(MemoryRegion *address_space_mem,
 
     initrd_size = 0;
     initrd_addr = 0;
-    kernel_size = sun4u_load_kernel(machine->kernel_filename,
-                                    machine->initrd_filename,
+    kernel_size = sun4u_load_kernel(args->kernel_filename,
+                                    args->initrd_filename,
                                     ram_size, &initrd_size, &initrd_addr,
                                     &kernel_addr, &kernel_entry);
 
-    sun4u_NVRAM_set_params(nvram, NVRAM_SIZE, "Sun4u", machine->ram_size,
-                           machine->boot_order,
+    sun4u_NVRAM_set_params(nvram, NVRAM_SIZE, "Sun4u", args->ram_size,
+                           args->boot_order,
                            kernel_addr, kernel_size,
-                           machine->kernel_cmdline,
+                           args->kernel_cmdline,
                            initrd_addr, initrd_size,
                            /* XXX: need an option to load a NVRAM image */
                            0,
                            graphic_width, graphic_height, graphic_depth,
                            (uint8_t *)&nd_table[0].macaddr);
 
-    fw_cfg = fw_cfg_init_io(BIOS_CFG_IOPORT);
+    fw_cfg = fw_cfg_init(BIOS_CFG_IOPORT, BIOS_CFG_IOPORT + 1, 0, 0);
     fw_cfg_add_i16(fw_cfg, FW_CFG_MAX_CPUS, (uint16_t)max_cpus);
     fw_cfg_add_i32(fw_cfg, FW_CFG_ID, 1);
     fw_cfg_add_i64(fw_cfg, FW_CFG_RAM_SIZE, (uint64_t)ram_size);
     fw_cfg_add_i16(fw_cfg, FW_CFG_MACHINE_ID, hwdef->machine_id);
     fw_cfg_add_i64(fw_cfg, FW_CFG_KERNEL_ADDR, kernel_entry);
     fw_cfg_add_i64(fw_cfg, FW_CFG_KERNEL_SIZE, kernel_size);
-    if (machine->kernel_cmdline) {
+    if (args->kernel_cmdline) {
         fw_cfg_add_i32(fw_cfg, FW_CFG_CMDLINE_SIZE,
-                       strlen(machine->kernel_cmdline) + 1);
-        fw_cfg_add_string(fw_cfg, FW_CFG_CMDLINE_DATA, machine->kernel_cmdline);
+                       strlen(args->kernel_cmdline) + 1);
+        fw_cfg_add_string(fw_cfg, FW_CFG_CMDLINE_DATA, args->kernel_cmdline);
     } else {
         fw_cfg_add_i32(fw_cfg, FW_CFG_CMDLINE_SIZE, 0);
     }
     fw_cfg_add_i64(fw_cfg, FW_CFG_INITRD_ADDR, initrd_addr);
     fw_cfg_add_i64(fw_cfg, FW_CFG_INITRD_SIZE, initrd_size);
-    fw_cfg_add_i16(fw_cfg, FW_CFG_BOOT_DEVICE, machine->boot_order[0]);
+    fw_cfg_add_i16(fw_cfg, FW_CFG_BOOT_DEVICE, args->boot_order[0]);
 
     fw_cfg_add_i16(fw_cfg, FW_CFG_SPARC64_WIDTH, graphic_width);
     fw_cfg_add_i16(fw_cfg, FW_CFG_SPARC64_HEIGHT, graphic_height);
@@ -949,21 +946,21 @@ static const struct hwdef hwdefs[] = {
 };
 
 /* Sun4u hardware initialisation */
-static void sun4u_init(MachineState *machine)
+static void sun4u_init(QEMUMachineInitArgs *args)
 {
-    sun4uv_init(get_system_memory(), machine, &hwdefs[0]);
+    sun4uv_init(get_system_memory(), args, &hwdefs[0]);
 }
 
 /* Sun4v hardware initialisation */
-static void sun4v_init(MachineState *machine)
+static void sun4v_init(QEMUMachineInitArgs *args)
 {
-    sun4uv_init(get_system_memory(), machine, &hwdefs[1]);
+    sun4uv_init(get_system_memory(), args, &hwdefs[1]);
 }
 
 /* Niagara hardware initialisation */
-static void niagara_init(MachineState *machine)
+static void niagara_init(QEMUMachineInitArgs *args)
 {
-    sun4uv_init(get_system_memory(), machine, &hwdefs[2]);
+    sun4uv_init(get_system_memory(), args, &hwdefs[2]);
 }
 
 static QEMUMachine sun4u_machine = {

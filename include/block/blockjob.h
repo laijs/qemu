@@ -74,7 +74,7 @@ struct BlockJob {
      * Set to true if the job should cancel itself.  The flag must
      * always be tested just before toggling the busy flag from false
      * to true.  After a job has been cancelled, it should only yield
-     * if #aio_poll will ("sooner or later") reenter the coroutine.
+     * if #qemu_aio_wait will ("sooner or later") reenter the coroutine.
      */
     bool cancelled;
 
@@ -87,14 +87,9 @@ struct BlockJob {
     /**
      * Set to false by the job while it is in a quiescent state, where
      * no I/O is pending and the job has yielded on any condition
-     * that is not detected by #aio_poll, such as a timer.
+     * that is not detected by #qemu_aio_wait, such as a timer.
      */
     bool busy;
-
-    /**
-     * Set to true when the job is ready to be completed.
-     */
-    bool ready;
 
     /** Status that is published by the query-block-jobs QMP API */
     BlockDeviceIoStatus iostatus;
@@ -109,10 +104,7 @@ struct BlockJob {
     int64_t speed;
 
     /** The completion function that will be called when the job completes.  */
-    BlockCompletionFunc *cb;
-
-    /** Block other operations when block job is running */
-    Error *blocker;
+    BlockDriverCompletionFunc *cb;
 
     /** The opaque value that is passed to the completion function.  */
     void *opaque;
@@ -137,7 +129,7 @@ struct BlockJob {
  * called from a wrapper that is specific to the job type.
  */
 void *block_job_create(const BlockJobDriver *driver, BlockDriverState *bs,
-                       int64_t speed, BlockCompletionFunc *cb,
+                       int64_t speed, BlockDriverCompletionFunc *cb,
                        void *opaque, Error **errp);
 
 /**
@@ -150,14 +142,6 @@ void *block_job_create(const BlockJobDriver *driver, BlockDriverState *bs,
  * nanoseconds.  Canceling the job will interrupt the wait immediately.
  */
 void block_job_sleep_ns(BlockJob *job, QEMUClockType type, int64_t ns);
-
-/**
- * block_job_yield:
- * @job: The job that calls the function.
- *
- * Yield the block job coroutine.
- */
-void block_job_yield(BlockJob *job);
 
 /**
  * block_job_completed:
@@ -230,21 +214,12 @@ void block_job_pause(BlockJob *job);
 void block_job_resume(BlockJob *job);
 
 /**
- * block_job_event_cancelled:
+ * qobject_from_block_job:
  * @job: The job whose information is requested.
  *
- * Send a BLOCK_JOB_CANCELLED event for the specified job.
+ * Return a QDict corresponding to @job's query-block-jobs entry.
  */
-void block_job_event_cancelled(BlockJob *job);
-
-/**
- * block_job_ready:
- * @job: The job which is now ready to complete.
- * @msg: Error message. Only present on failure.
- *
- * Send a BLOCK_JOB_COMPLETED event for the specified job.
- */
-void block_job_event_completed(BlockJob *job, const char *msg);
+QObject *qobject_from_block_job(BlockJob *job);
 
 /**
  * block_job_ready:
@@ -252,7 +227,7 @@ void block_job_event_completed(BlockJob *job, const char *msg);
  *
  * Send a BLOCK_JOB_READY event for the specified job.
  */
-void block_job_event_ready(BlockJob *job);
+void block_job_ready(BlockJob *job);
 
 /**
  * block_job_is_paused:
@@ -278,21 +253,6 @@ bool block_job_is_paused(BlockJob *job);
 int block_job_cancel_sync(BlockJob *job);
 
 /**
- * block_job_complete_sync:
- * @job: The job to be completed.
- * @errp: Error object which may be set by block_job_complete(); this is not
- *        necessarily set on every error, the job return value has to be
- *        checked as well.
- *
- * Synchronously complete the job.  The completion callback is called before the
- * function returns, unless it is NULL (which is permissible when using this
- * function).
- *
- * Returns the return value from the job.
- */
-int block_job_complete_sync(BlockJob *job, Error **errp);
-
-/**
  * block_job_iostatus_reset:
  * @job: The job whose I/O status should be reset.
  *
@@ -315,23 +275,4 @@ void block_job_iostatus_reset(BlockJob *job);
 BlockErrorAction block_job_error_action(BlockJob *job, BlockDriverState *bs,
                                         BlockdevOnError on_err,
                                         int is_read, int error);
-
-typedef void BlockJobDeferToMainLoopFn(BlockJob *job, void *opaque);
-
-/**
- * block_job_defer_to_main_loop:
- * @job: The job
- * @fn: The function to run in the main loop
- * @opaque: The opaque value that is passed to @fn
- *
- * Execute a given function in the main loop with the BlockDriverState
- * AioContext acquired.  Block jobs must call bdrv_unref(), bdrv_close(), and
- * anything that uses bdrv_drain_all() in the main loop.
- *
- * The @job AioContext is held while @fn executes.
- */
-void block_job_defer_to_main_loop(BlockJob *job,
-                                  BlockJobDeferToMainLoopFn *fn,
-                                  void *opaque);
-
 #endif

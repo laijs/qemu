@@ -157,6 +157,11 @@ static inline int stream_running(struct Stream *s)
     return s->regs[R_DMACR] & DMACR_RUNSTOP;
 }
 
+static inline int stream_halted(struct Stream *s)
+{
+    return s->regs[R_DMASR] & DMASR_HALTED;
+}
+
 static inline int stream_idle(struct Stream *s)
 {
     return !!(s->regs[R_DMASR] & DMASR_IDLE);
@@ -529,42 +534,40 @@ static void xilinx_axidma_realize(DeviceState *dev, Error **errp)
     XilinxAXIDMAStreamSlave *ds = XILINX_AXI_DMA_DATA_STREAM(&s->rx_data_dev);
     XilinxAXIDMAStreamSlave *cs = XILINX_AXI_DMA_CONTROL_STREAM(
                                                             &s->rx_control_dev);
-    Error *local_err = NULL;
+    Error *local_errp = NULL;
 
     object_property_add_link(OBJECT(ds), "dma", TYPE_XILINX_AXI_DMA,
                              (Object **)&ds->dma,
                              object_property_allow_set_link,
                              OBJ_PROP_LINK_UNREF_ON_RELEASE,
-                             &local_err);
+                             &local_errp);
     object_property_add_link(OBJECT(cs), "dma", TYPE_XILINX_AXI_DMA,
                              (Object **)&cs->dma,
                              object_property_allow_set_link,
                              OBJ_PROP_LINK_UNREF_ON_RELEASE,
-                             &local_err);
-    if (local_err) {
+                             &local_errp);
+    if (local_errp) {
         goto xilinx_axidma_realize_fail;
     }
-    object_property_set_link(OBJECT(ds), OBJECT(s), "dma", &local_err);
-    object_property_set_link(OBJECT(cs), OBJECT(s), "dma", &local_err);
-    if (local_err) {
+    object_property_set_link(OBJECT(ds), OBJECT(s), "dma", &local_errp);
+    object_property_set_link(OBJECT(cs), OBJECT(s), "dma", &local_errp);
+    if (local_errp) {
         goto xilinx_axidma_realize_fail;
     }
 
     int i;
 
     for (i = 0; i < 2; i++) {
-        struct Stream *st = &s->streams[i];
-
-        st->nr = i;
-        st->bh = qemu_bh_new(timer_hit, st);
-        st->ptimer = ptimer_init(st->bh);
-        ptimer_set_freq(st->ptimer, s->freqhz);
+        s->streams[i].nr = i;
+        s->streams[i].bh = qemu_bh_new(timer_hit, &s->streams[i]);
+        s->streams[i].ptimer = ptimer_init(s->streams[i].bh);
+        ptimer_set_freq(s->streams[i].ptimer, s->freqhz);
     }
     return;
 
 xilinx_axidma_realize_fail:
     if (!*errp) {
-        *errp = local_err;
+        *errp = local_errp;
     }
 }
 

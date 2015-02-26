@@ -42,7 +42,6 @@
 #include "hw/sparc/sun4m.h"
 #include "pcnet.h"
 #include "trace.h"
-#include "sysemu/sysemu.h"
 
 #define TYPE_LANCE "lance"
 #define SYSBUS_PCNET(obj) \
@@ -91,19 +90,28 @@ static const MemoryRegionOps lance_mem_ops = {
     },
 };
 
+static void lance_cleanup(NetClientState *nc)
+{
+    PCNetState *d = qemu_get_nic_opaque(nc);
+
+    pcnet_common_cleanup(d);
+}
+
 static NetClientInfo net_lance_info = {
     .type = NET_CLIENT_OPTIONS_KIND_NIC,
     .size = sizeof(NICState),
     .can_receive = pcnet_can_receive,
     .receive = pcnet_receive,
     .link_status_changed = pcnet_set_link_status,
+    .cleanup = lance_cleanup,
 };
 
 static const VMStateDescription vmstate_lance = {
     .name = "pcnet",
     .version_id = 3,
     .minimum_version_id = 2,
-    .fields = (VMStateField[]) {
+    .minimum_version_id_old = 2,
+    .fields      = (VMStateField []) {
         VMSTATE_STRUCT(state, SysBusPCNetState, 0, vmstate_pcnet, PCNetState),
         VMSTATE_END_OF_LIST()
     }
@@ -136,16 +144,6 @@ static void lance_reset(DeviceState *dev)
     pcnet_h_reset(&d->state);
 }
 
-static void lance_instance_init(Object *obj)
-{
-    SysBusPCNetState *d = SYSBUS_PCNET(obj);
-    PCNetState *s = &d->state;
-
-    device_add_bootindex_property(obj, &s->conf.bootindex,
-                                  "bootindex", "/ethernet-phy@0",
-                                  DEVICE(obj), NULL);
-}
-
 static Property lance_properties[] = {
     DEFINE_PROP_PTR("dma", SysBusPCNetState, state.dma_opaque),
     DEFINE_NIC_PROPERTIES(SysBusPCNetState, state.conf),
@@ -172,7 +170,6 @@ static const TypeInfo lance_info = {
     .parent        = TYPE_SYS_BUS_DEVICE,
     .instance_size = sizeof(SysBusPCNetState),
     .class_init    = lance_class_init,
-    .instance_init = lance_instance_init,
 };
 
 static void lance_register_types(void)

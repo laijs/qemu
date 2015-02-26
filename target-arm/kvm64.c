@@ -21,7 +21,6 @@
 #include "sysemu/kvm.h"
 #include "kvm_arm.h"
 #include "cpu.h"
-#include "internals.h"
 #include "hw/arm/arm.h"
 
 static inline void set_feature(uint64_t *features, int feature)
@@ -78,49 +77,26 @@ bool kvm_arm_get_host_cpu_features(ARMHostCPUClass *ahcc)
 
 int kvm_arch_init_vcpu(CPUState *cs)
 {
-    int ret;
     ARMCPU *cpu = ARM_CPU(cs);
+    struct kvm_vcpu_init init;
+    int ret;
 
     if (cpu->kvm_target == QEMU_KVM_ARM_TARGET_NONE ||
-        !object_dynamic_cast(OBJECT(cpu), TYPE_AARCH64_CPU)) {
+        !arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
         fprintf(stderr, "KVM is not supported for this guest CPU type\n");
         return -EINVAL;
     }
 
-    /* Determine init features for this CPU */
-    memset(cpu->kvm_init_features, 0, sizeof(cpu->kvm_init_features));
+    init.target = cpu->kvm_target;
+    memset(init.features, 0, sizeof(init.features));
     if (cpu->start_powered_off) {
-        cpu->kvm_init_features[0] |= 1 << KVM_ARM_VCPU_POWER_OFF;
+        init.features[0] = 1 << KVM_ARM_VCPU_POWER_OFF;
     }
-    if (kvm_check_extension(cs->kvm_state, KVM_CAP_ARM_PSCI_0_2)) {
-        cpu->psci_version = 2;
-        cpu->kvm_init_features[0] |= 1 << KVM_ARM_VCPU_PSCI_0_2;
-    }
-    if (!arm_feature(&cpu->env, ARM_FEATURE_AARCH64)) {
-        cpu->kvm_init_features[0] |= 1 << KVM_ARM_VCPU_EL1_32BIT;
-    }
+    ret = kvm_vcpu_ioctl(cs, KVM_ARM_VCPU_INIT, &init);
 
-    /* Do KVM_ARM_VCPU_INIT ioctl */
-    ret = kvm_arm_vcpu_init(cs);
-    if (ret) {
-        return ret;
-    }
+    /* TODO : support for save/restore/reset of system regs via tuple list */
 
-    return kvm_arm_init_cpreg_list(cpu);
-}
-
-bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx)
-{
-    /* Return true if the regidx is a register we should synchronize
-     * via the cpreg_tuples array (ie is not a core reg we sync by
-     * hand in kvm_arch_get/put_registers())
-     */
-    switch (regidx & KVM_REG_ARM_COPROC_MASK) {
-    case KVM_REG_ARM_CORE:
-        return false;
-    default:
-        return true;
-    }
+    return ret;
 }
 
 #define AARCH64_CORE_REG(x)   (KVM_REG_ARM64 | KVM_REG_SIZE_U64 | \
@@ -136,13 +112,6 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     ARMCPU *cpu = ARM_CPU(cs);
     CPUARMState *env = &cpu->env;
 
-    /* If we are in AArch32 mode then we need to copy the AArch32 regs to the
-     * AArch64 registers before pushing them out to 64-bit KVM.
-     */
-    if (!is_a64(env)) {
-        aarch64_sync_32_to_64(env);
-    }
-
     for (i = 0; i < 31; i++) {
         reg.id = AARCH64_CORE_REG(regs.regs[i]);
         reg.addr = (uintptr_t) &env->xregs[i];
@@ -155,7 +124,11 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     /* KVM puts SP_EL0 in regs.sp and SP_EL1 in regs.sp_el1. On the
      * QEMU side we keep the current SP in xregs[31] as well.
      */
-    aarch64_save_sp(env, 1);
+    if (env->pstate & PSTATE_SP) {
+        env->sp_el[1] = env->xregs[31];
+    } else {
+        env->sp_el[0] = env->xregs[31];
+    }
 
     reg.id = AARCH64_CORE_REG(regs.sp);
     reg.addr = (uintptr_t) &env->sp_el[0];
@@ -172,11 +145,7 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     }
 
     /* Note that KVM thinks pstate is 64 bit but we use a uint32_t */
-    if (is_a64(env)) {
-        val = pstate_read(env);
-    } else {
-        val = cpsr_read(env);
-    }
+    val = pstate_read(env);
     reg.id = AARCH64_CORE_REG(regs.pstate);
     reg.addr = (uintptr_t) &val;
     ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &reg);
@@ -192,7 +161,7 @@ int kvm_arch_put_registers(CPUState *cs, int level)
     }
 
     reg.id = AARCH64_CORE_REG(elr_el1);
-    reg.addr = (uintptr_t) &env->elr_el[1];
+    reg.addr = (uintptr_t) &env->elr_el1;
     ret = kvm_vcpu_ioctl(cs, KVM_SET_ONE_REG, &reg);
     if (ret) {
         return ret;
@@ -207,12 +176,9 @@ int kvm_arch_put_registers(CPUState *cs, int level)
         }
     }
 
-    if (!write_list_to_kvmstate(cpu)) {
-        return EINVAL;
-    }
-
     /* TODO:
      * FP state
+     * system registers
      */
     return ret;
 }
@@ -256,19 +222,16 @@ int kvm_arch_get_registers(CPUState *cs)
     if (ret) {
         return ret;
     }
-
-    env->aarch64 = ((val & PSTATE_nRW) == 0);
-    if (is_a64(env)) {
-        pstate_write(env, val);
-    } else {
-        env->uncached_cpsr = val & CPSR_M;
-        cpsr_write(env, val, 0xffffffff);
-    }
+    pstate_write(env, val);
 
     /* KVM puts SP_EL0 in regs.sp and SP_EL1 in regs.sp_el1. On the
      * QEMU side we keep the current SP in xregs[31] as well.
      */
-    aarch64_restore_sp(env, 1);
+    if (env->pstate & PSTATE_SP) {
+        env->xregs[31] = env->sp_el[1];
+    } else {
+        env->xregs[31] = env->sp_el[0];
+    }
 
     reg.id = AARCH64_CORE_REG(regs.pc);
     reg.addr = (uintptr_t) &env->pc;
@@ -277,17 +240,8 @@ int kvm_arch_get_registers(CPUState *cs)
         return ret;
     }
 
-    /* If we are in AArch32 mode then we need to sync the AArch32 regs with the
-     * incoming AArch64 regs received from 64-bit KVM.
-     * We must perform this after all of the registers have been acquired from
-     * the kernel.
-     */
-    if (!is_a64(env)) {
-        aarch64_sync_64_to_32(env);
-    }
-
     reg.id = AARCH64_CORE_REG(elr_el1);
-    reg.addr = (uintptr_t) &env->elr_el[1];
+    reg.addr = (uintptr_t) &env->elr_el1;
     ret = kvm_vcpu_ioctl(cs, KVM_GET_ONE_REG, &reg);
     if (ret) {
         return ret;
@@ -302,14 +256,10 @@ int kvm_arch_get_registers(CPUState *cs)
         }
     }
 
-    if (!write_kvmstate_to_list(cpu)) {
-        return EINVAL;
-    }
-    /* Note that it's OK to have registers which aren't in CPUState,
-     * so we can ignore a failure return here.
-     */
-    write_list_to_cpustate(cpu);
-
     /* TODO: other registers */
     return ret;
+}
+
+void kvm_arch_reset_vcpu(CPUState *cs)
+{
 }

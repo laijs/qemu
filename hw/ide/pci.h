@@ -3,13 +3,6 @@
 
 #include <hw/ide/internal.h>
 
-#define BM_STATUS_DMAING 0x01
-#define BM_STATUS_ERROR  0x02
-#define BM_STATUS_INT    0x04
-
-#define BM_CMD_START     0x01
-#define BM_CMD_READ      0x08
-
 typedef struct BMDMAState {
     IDEDMA dma;
     uint8_t cmd;
@@ -23,7 +16,7 @@ typedef struct BMDMAState {
     uint32_t cur_prd_addr;
     uint32_t cur_prd_len;
     uint8_t unit;
-    BlockCompletionFunc *dma_cb;
+    BlockDriverCompletionFunc *dma_cb;
     int64_t sector_num;
     uint32_t nsector;
     MemoryRegion addr_ioport;

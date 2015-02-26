@@ -26,17 +26,33 @@
  */
 
 #include "cpu.h"
-#include "exec/helper-proto.h"
+#include "helper.h"
 #include "qemu/host-utils.h"
-#include "exec/cpu_ldst.h"
+#include "exec/softmmu_exec.h"
 #include "exec/address-spaces.h"
-#include "qemu/timer.h"
 
-void xtensa_cpu_do_unaligned_access(CPUState *cs,
-        vaddr addr, int is_write, int is_user, uintptr_t retaddr)
+static void do_unaligned_access(CPUXtensaState *env,
+        target_ulong addr, int is_write, int is_user, uintptr_t retaddr);
+
+#define ALIGNED_ONLY
+#define MMUSUFFIX _mmu
+
+#define SHIFT 0
+#include "exec/softmmu_template.h"
+
+#define SHIFT 1
+#include "exec/softmmu_template.h"
+
+#define SHIFT 2
+#include "exec/softmmu_template.h"
+
+#define SHIFT 3
+#include "exec/softmmu_template.h"
+
+static void do_unaligned_access(CPUXtensaState *env,
+        target_ulong addr, int is_write, int is_user, uintptr_t retaddr)
 {
-    XtensaCPU *cpu = XTENSA_CPU(cs);
-    CPUXtensaState *env = &cpu->env;
+    XtensaCPU *cpu = xtensa_env_get_cpu(env);
 
     if (xtensa_option_enabled(env->config, XTENSA_OPTION_UNALIGNED_EXCEPTION) &&
             !xtensa_option_enabled(env->config, XTENSA_OPTION_HW_ALIGNMENT)) {
@@ -235,12 +251,6 @@ void HELPER(entry)(CPUXtensaState *env, uint32_t pc, uint32_t s, uint32_t imm)
                 pc, env->sregs[PS]);
         HELPER(exception_cause)(env, pc, ILLEGAL_INSTRUCTION_CAUSE);
     } else {
-        uint32_t windowstart = xtensa_replicate_windowstart(env) >>
-            (env->sregs[WINDOW_BASE] + 1);
-
-        if (windowstart & ((1 << callinc) - 1)) {
-            HELPER(window_check)(env, pc, callinc);
-        }
         env->regs[(callinc << 2) | (s & 3)] = env->regs[s] - (imm << 3);
         rotate_window(env, callinc);
         env->sregs[WINDOW_START] |=
@@ -251,27 +261,34 @@ void HELPER(entry)(CPUXtensaState *env, uint32_t pc, uint32_t s, uint32_t imm)
 void HELPER(window_check)(CPUXtensaState *env, uint32_t pc, uint32_t w)
 {
     uint32_t windowbase = windowbase_bound(env->sregs[WINDOW_BASE], env);
-    uint32_t windowstart = xtensa_replicate_windowstart(env) >>
-        (env->sregs[WINDOW_BASE] + 1);
-    uint32_t n = ctz32(windowstart) + 1;
+    uint32_t windowstart = env->sregs[WINDOW_START];
+    uint32_t m, n;
 
-    assert(n <= w);
+    if ((env->sregs[PS] & (PS_WOE | PS_EXCM)) ^ PS_WOE) {
+        return;
+    }
 
+    for (n = 1; ; ++n) {
+        if (n > w) {
+            return;
+        }
+        if (windowstart & windowstart_bit(windowbase + n, env)) {
+            break;
+        }
+    }
+
+    m = windowbase_bound(windowbase + n, env);
     rotate_window(env, n);
     env->sregs[PS] = (env->sregs[PS] & ~PS_OWB) |
         (windowbase << PS_OWB_SHIFT) | PS_EXCM;
     env->sregs[EPC1] = env->pc = pc;
 
-    switch (ctz32(windowstart >> n)) {
-    case 0:
+    if (windowstart & windowstart_bit(m + 1, env)) {
         HELPER(exception)(env, EXC_WINDOW_OVERFLOW4);
-        break;
-    case 1:
+    } else if (windowstart & windowstart_bit(m + 2, env)) {
         HELPER(exception)(env, EXC_WINDOW_OVERFLOW8);
-        break;
-    default:
+    } else {
         HELPER(exception)(env, EXC_WINDOW_OVERFLOW12);
-        break;
     }
 }
 

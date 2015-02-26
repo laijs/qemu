@@ -443,7 +443,11 @@ static int vnc_set_x509_credential(VncDisplay *vd,
 {
     struct stat sb;
 
-    g_free(*cred);
+    if (*cred) {
+        g_free(*cred);
+        *cred = NULL;
+    }
+
     *cred = g_malloc(strlen(certdir) + strlen(filename) + 2);
 
     strcpy(*cred, certdir);

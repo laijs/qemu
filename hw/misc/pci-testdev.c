@@ -293,6 +293,8 @@ pci_testdev_uninit(PCIDevice *dev)
         g_free(d->tests[i].hdr);
     }
     g_free(d->tests);
+    memory_region_destroy(&d->mmio);
+    memory_region_destroy(&d->portio);
 }
 
 static void qdev_pci_testdev_reset(DeviceState *dev)

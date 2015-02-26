@@ -62,7 +62,6 @@ typedef struct S390IPLState {
 static int s390_ipl_init(SysBusDevice *dev)
 {
     S390IPLState *ipl = S390_IPL(dev);
-    uint64_t pentry = KERN_IMAGE_START;
     int kernel_size;
 
     if (!ipl->kernel) {
@@ -95,31 +94,31 @@ static int s390_ipl_init(SysBusDevice *dev)
             hw_error("could not load bootloader '%s'\n", bios_name);
         }
         return 0;
-    }
-
-    kernel_size = load_elf(ipl->kernel, NULL, NULL, &pentry, NULL,
-                           NULL, 1, ELF_MACHINE, 0);
-    if (kernel_size < 0) {
-        kernel_size = load_image_targphys(ipl->kernel, 0, ram_size);
-    }
-    if (kernel_size < 0) {
-        fprintf(stderr, "could not load kernel '%s'\n", ipl->kernel);
-        return -1;
-    }
-    /*
-     * Is it a Linux kernel (starting at 0x10000)? If yes, we fill in the
-     * kernel parameters here as well. Note: For old kernels (up to 3.2)
-     * we can not rely on the ELF entry point - it was 0x800 (the SALIPL
-     * loader) and it won't work. For this case we force it to 0x10000, too.
-     */
-    if (pentry == KERN_IMAGE_START || pentry == 0x800) {
-        ipl->start_addr = KERN_IMAGE_START;
-        /* Overwrite parameters in the kernel image, which are "rom" */
-        strcpy(rom_ptr(KERN_PARM_AREA), ipl->cmdline);
     } else {
-        ipl->start_addr = pentry;
+        uint64_t pentry = KERN_IMAGE_START;
+        kernel_size = load_elf(ipl->kernel, NULL, NULL, &pentry, NULL,
+                               NULL, 1, ELF_MACHINE, 0);
+        if (kernel_size < 0) {
+            kernel_size = load_image_targphys(ipl->kernel, 0, ram_size);
+        }
+        if (kernel_size < 0) {
+            fprintf(stderr, "could not load kernel '%s'\n", ipl->kernel);
+            return -1;
+        }
+        /*
+         * Is it a Linux kernel (starting at 0x10000)? If yes, we fill in the
+         * kernel parameters here as well. Note: For old kernels (up to 3.2)
+         * we can not rely on the ELF entry point - it was 0x800 (the SALIPL
+         * loader) and it won't work. For this case we force it to 0x10000, too.
+         */
+        if (pentry == KERN_IMAGE_START || pentry == 0x800) {
+            ipl->start_addr = KERN_IMAGE_START;
+            /* Overwrite parameters in the kernel image, which are "rom" */
+            strcpy(rom_ptr(KERN_PARM_AREA), ipl->cmdline);
+        } else {
+            ipl->start_addr = pentry;
+        }
     }
-
     if (ipl->initrd) {
         ram_addr_t initrd_offset;
         int initrd_size;
@@ -177,7 +176,7 @@ static void s390_ipl_reset(DeviceState *dev)
         }
     }
 
-    s390_cpu_set_state(CPU_STATE_OPERATING, cpu);
+    s390_add_running_cpu(cpu);
 }
 
 static void s390_ipl_class_init(ObjectClass *klass, void *data)

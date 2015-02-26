@@ -32,7 +32,6 @@
 #include "hw/loader.h"
 #include "qemu/range.h"
 #include "qmp-commands.h"
-#include "trace.h"
 #include "hw/pci/msi.h"
 #include "hw/pci/msix.h"
 #include "exec/address-spaces.h"
@@ -65,7 +64,8 @@ static const VMStateDescription vmstate_pcibus = {
     .name = "PCIBUS",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField[]) {
         VMSTATE_INT32_EQUAL(nirq, PCIBus),
         VMSTATE_VARRAY_INT32(irq_count, PCIBus,
                              nirq, 0, vmstate_info_int32,
@@ -473,8 +473,9 @@ const VMStateDescription vmstate_pci_device = {
     .name = "PCIDevice",
     .version_id = 2,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
-        VMSTATE_INT32_POSITIVE_LE(version_id, PCIDevice),
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField []) {
+        VMSTATE_INT32_LE(version_id, PCIDevice),
         VMSTATE_BUFFER_UNSAFE_INFO(config, PCIDevice, 0,
                                    vmstate_info_pci_config,
                                    PCI_CONFIG_SPACE_SIZE),
@@ -489,8 +490,9 @@ const VMStateDescription vmstate_pcie_device = {
     .name = "PCIEDevice",
     .version_id = 2,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
-        VMSTATE_INT32_POSITIVE_LE(version_id, PCIDevice),
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField []) {
+        VMSTATE_INT32_LE(version_id, PCIDevice),
         VMSTATE_BUFFER_UNSAFE_INFO(config, PCIDevice, 0,
                                    vmstate_info_pci_config,
                                    PCIE_CONFIG_SPACE_SIZE),
@@ -513,7 +515,7 @@ void pci_device_save(PCIDevice *s, QEMUFile *f)
      * This makes us compatible with old devices
      * which never set or clear this bit. */
     s->config[PCI_STATUS] &= ~PCI_STATUS_INTERRUPT;
-    vmstate_save_state(f, pci_get_vmstate(s), s, NULL);
+    vmstate_save_state(f, pci_get_vmstate(s), s);
     /* Restore the interrupt status bit. */
     pci_update_irq_status(s);
 }
@@ -603,12 +605,12 @@ PCIBus *pci_get_bus_devfn(int *devfnp, PCIBus *root, const char *devaddr)
     int dom, bus;
     unsigned slot;
 
+    assert(!root->parent_dev);
+
     if (!root) {
         fprintf(stderr, "No primary PCI bus\n");
         return NULL;
     }
-
-    assert(!root->parent_dev);
 
     if (!devaddr) {
         *devfnp = -1;
@@ -800,6 +802,7 @@ static void do_pci_unregister_device(PCIDevice *pci_dev)
     pci_config_free(pci_dev);
 
     address_space_destroy(&pci_dev->bus_master_as);
+    memory_region_destroy(&pci_dev->bus_master_enable_region);
 }
 
 /* -1 for devfn means auto assign */
@@ -827,7 +830,6 @@ static PCIDevice *do_pci_register_device(PCIDevice *pci_dev, PCIBus *bus,
     }
 
     pci_dev->bus = bus;
-    pci_dev->devfn = devfn;
     dma_as = pci_device_iommu_address_space(pci_dev);
 
     memory_region_init_alias(&pci_dev->bus_master_enable_region,
@@ -837,6 +839,7 @@ static PCIDevice *do_pci_register_device(PCIDevice *pci_dev, PCIBus *bus,
     address_space_init(&pci_dev->bus_master_as, &pci_dev->bus_master_enable_region,
                        name);
 
+    pci_dev->devfn = devfn;
     pstrcpy(pci_dev->name, sizeof(pci_dev->name), name);
     pci_dev->irq_state = 0;
     pci_config_alloc(pci_dev);
@@ -1107,18 +1110,10 @@ static void pci_update_mappings(PCIDevice *d)
 
         /* now do the real mapping */
         if (r->addr != PCI_BAR_UNMAPPED) {
-            trace_pci_update_mappings_del(d, pci_bus_num(d->bus),
-                                          PCI_FUNC(d->devfn),
-                                          PCI_SLOT(d->devfn),
-                                          i, r->addr, r->size);
             memory_region_del_subregion(r->address_space, r->memory);
         }
         r->addr = new_addr;
         if (r->addr != PCI_BAR_UNMAPPED) {
-            trace_pci_update_mappings_add(d, pci_bus_num(d->bus),
-                                          PCI_FUNC(d->devfn),
-                                          PCI_SLOT(d->devfn),
-                                          i, r->addr, r->size);
             memory_region_add_subregion_overlap(r->address_space,
                                                 r->addr, r->memory, 1);
         }
@@ -1155,10 +1150,9 @@ uint32_t pci_default_read_config(PCIDevice *d,
     return le32_to_cpu(val);
 }
 
-void pci_default_write_config(PCIDevice *d, uint32_t addr, uint32_t val_in, int l)
+void pci_default_write_config(PCIDevice *d, uint32_t addr, uint32_t val, int l)
 {
     int i, was_irq_disabled = pci_irq_disabled(d);
-    uint32_t val = val_in;
 
     for (i = 0; i < l; val >>= 8, ++i) {
         uint8_t wmask = d->wmask[addr + i];
@@ -1180,8 +1174,8 @@ void pci_default_write_config(PCIDevice *d, uint32_t addr, uint32_t val_in, int 
                                     & PCI_COMMAND_MASTER);
     }
 
-    msi_write_config(d, addr, val_in, l);
-    msix_write_config(d, addr, val_in, l);
+    msi_write_config(d, addr, val, l);
+    msix_write_config(d, addr, val, l);
 }
 
 /***********************************************************/
@@ -1785,12 +1779,7 @@ static int pci_qdev_init(DeviceState *qdev)
         pci_dev->romfile = g_strdup(pc->romfile);
         is_default_rom = true;
     }
-
-    rc = pci_add_option_rom(pci_dev, is_default_rom);
-    if (rc != 0) {
-        pci_unregister_device(DEVICE(pci_dev));
-        return rc;
-    }
+    pci_add_option_rom(pci_dev, is_default_rom);
 
     return 0;
 }
@@ -1951,15 +1940,6 @@ static int pci_add_option_rom(PCIDevice *pdev, bool is_default_rom)
          * for 0.11 compatibility.
          */
         int class = pci_get_word(pdev->config + PCI_CLASS_DEVICE);
-
-        /*
-         * Hot-plugged devices can't use the option ROM
-         * if the rom bar is disabled.
-         */
-        if (DEVICE(pdev)->hotplugged) {
-            return -1;
-        }
-
         if (class == 0x0300) {
             rom_add_vga(pdev->romfile);
         } else {
@@ -1997,7 +1977,7 @@ static int pci_add_option_rom(PCIDevice *pdev, bool is_default_rom)
         snprintf(name, sizeof(name), "%s.rom", object_get_typename(OBJECT(pdev)));
     }
     pdev->has_rom = true;
-    memory_region_init_ram(&pdev->rom, OBJECT(pdev), name, size, &error_abort);
+    memory_region_init_ram(&pdev->rom, OBJECT(pdev), name, size);
     vmstate_register_ram(&pdev->rom, &pdev->qdev);
     ptr = memory_region_get_ram_ptr(&pdev->rom);
     load_image(path, ptr);
@@ -2019,6 +1999,7 @@ static void pci_del_option_rom(PCIDevice *pdev)
         return;
 
     vmstate_unregister_ram(&pdev->rom, &pdev->qdev);
+    memory_region_destroy(&pdev->rom);
     pdev->has_rom = false;
 }
 
@@ -2032,32 +2013,12 @@ static void pci_del_option_rom(PCIDevice *pdev)
 int pci_add_capability(PCIDevice *pdev, uint8_t cap_id,
                        uint8_t offset, uint8_t size)
 {
-    int ret;
-    Error *local_err = NULL;
-
-    ret = pci_add_capability2(pdev, cap_id, offset, size, &local_err);
-    if (local_err) {
-        assert(ret < 0);
-        error_report("%s", error_get_pretty(local_err));
-        error_free(local_err);
-    } else {
-        /* success implies a positive offset in config space */
-        assert(ret > 0);
-    }
-    return ret;
-}
-
-int pci_add_capability2(PCIDevice *pdev, uint8_t cap_id,
-                       uint8_t offset, uint8_t size,
-                       Error **errp)
-{
     uint8_t *config;
     int i, overlapping_cap;
 
     if (!offset) {
         offset = pci_find_space(pdev, size);
         if (!offset) {
-            error_setg(errp, "out of PCI config space");
             return -ENOSPC;
         }
     } else {
@@ -2068,12 +2029,12 @@ int pci_add_capability2(PCIDevice *pdev, uint8_t cap_id,
         for (i = offset; i < offset + size; i++) {
             overlapping_cap = pci_find_capability_at_offset(pdev, i);
             if (overlapping_cap) {
-                error_setg(errp, "%s:%02x:%02x.%x "
-                           "Attempt to add PCI capability %x at offset "
-                           "%x overlaps existing capability %x at offset %x",
-                           pci_root_bus_path(pdev), pci_bus_num(pdev->bus),
-                           PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn),
-                           cap_id, offset, overlapping_cap, i);
+                fprintf(stderr, "ERROR: %s:%02x:%02x.%x "
+                        "Attempt to add PCI capability %x at offset "
+                        "%x overlaps existing capability %x at offset %x\n",
+                        pci_root_bus_path(pdev), pci_bus_num(pdev->bus),
+                        PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn),
+                        cap_id, offset, overlapping_cap, i);
                 return -EINVAL;
             }
         }

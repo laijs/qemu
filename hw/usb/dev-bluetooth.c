@@ -19,7 +19,6 @@
  */
 
 #include "qemu-common.h"
-#include "qemu/error-report.h"
 #include "hw/usb.h"
 #include "hw/usb/desc.h"
 #include "sysemu/bt.h"
@@ -501,21 +500,15 @@ static void usb_bt_handle_destroy(USBDevice *dev)
     s->hci->acl_recv = NULL;
 }
 
-static void usb_bt_realize(USBDevice *dev, Error **errp)
+static int usb_bt_initfn(USBDevice *dev)
 {
     struct USBBtState *s = DO_UPCAST(struct USBBtState, dev, dev);
 
     usb_desc_create_serial(dev);
     usb_desc_init(dev);
-    s->dev.opaque = s;
-    if (!s->hci) {
-        s->hci = bt_new_hci(qemu_find_bt_vlan(0));
-    }
-    s->hci->opaque = s;
-    s->hci->evt_recv = usb_bt_out_hci_packet_event;
-    s->hci->acl_recv = usb_bt_out_hci_packet_acl;
-    usb_bt_handle_reset(&s->dev);
     s->intr = usb_ep_get(dev, USB_TOKEN_IN, USB_EVT_EP);
+
+    return 0;
 }
 
 static USBDevice *usb_bt_init(USBBus *bus, const char *cmdline)
@@ -523,19 +516,29 @@ static USBDevice *usb_bt_init(USBBus *bus, const char *cmdline)
     USBDevice *dev;
     struct USBBtState *s;
     HCIInfo *hci;
-    const char *name = "usb-bt-dongle";
 
     if (*cmdline) {
         hci = hci_init(cmdline);
     } else {
         hci = bt_new_hci(qemu_find_bt_vlan(0));
     }
+
     if (!hci)
         return NULL;
-
-    dev = usb_create(bus, name);
+    dev = usb_create_simple(bus, "usb-bt-dongle");
+    if (!dev) {
+        return NULL;
+    }
     s = DO_UPCAST(struct USBBtState, dev, dev);
+    s->dev.opaque = s;
+
     s->hci = hci;
+    s->hci->opaque = s;
+    s->hci->evt_recv = usb_bt_out_hci_packet_event;
+    s->hci->acl_recv = usb_bt_out_hci_packet_acl;
+
+    usb_bt_handle_reset(&s->dev);
+
     return dev;
 }
 
@@ -549,7 +552,7 @@ static void usb_bt_class_initfn(ObjectClass *klass, void *data)
     DeviceClass *dc = DEVICE_CLASS(klass);
     USBDeviceClass *uc = USB_DEVICE_CLASS(klass);
 
-    uc->realize        = usb_bt_realize;
+    uc->init           = usb_bt_initfn;
     uc->product_desc   = "QEMU BT dongle";
     uc->usb_desc       = &desc_bluetooth;
     uc->handle_reset   = usb_bt_handle_reset;

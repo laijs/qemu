@@ -25,17 +25,15 @@
 #include "cpu.h"
 #include "tcg-op.h"
 #include "qemu/log.h"
-#include "arm_ldst.h"
 #include "translate.h"
 #include "internals.h"
 #include "qemu/host-utils.h"
 
 #include "exec/gen-icount.h"
 
-#include "exec/helper-proto.h"
-#include "exec/helper-gen.h"
-
-#include "trace-tcg.h"
+#include "helper.h"
+#define GEN_HELPER 1
+#include "helper.h"
 
 static TCGv_i64 cpu_X[32];
 static TCGv_i64 cpu_pc;
@@ -87,8 +85,6 @@ typedef void NeonGenWidenFn(TCGv_i64, TCGv_i32);
 typedef void NeonGenTwoSingleOPFn(TCGv_i32, TCGv_i32, TCGv_i32, TCGv_ptr);
 typedef void NeonGenTwoDoubleOPFn(TCGv_i64, TCGv_i64, TCGv_i64, TCGv_ptr);
 typedef void NeonGenOneOpFn(TCGv_i64, TCGv_i64);
-typedef void CryptoTwoOpEnvFn(TCGv_ptr, TCGv_i32, TCGv_i32);
-typedef void CryptoThreeOpEnvFn(TCGv_ptr, TCGv_i32, TCGv_i32, TCGv_i32);
 
 /* initialize TCG globals.  */
 void a64_translate_init(void)
@@ -121,23 +117,6 @@ void a64_translate_init(void)
     cpu_exclusive_info = tcg_global_mem_new_i32(TCG_AREG0,
         offsetof(CPUARMState, exclusive_info), "exclusive_info");
 #endif
-}
-
-static inline ARMMMUIdx get_a64_user_mem_index(DisasContext *s)
-{
-    /* Return the mmu_idx to use for A64 "unprivileged load/store" insns:
-     *  if EL1, access as if EL0; otherwise access at current EL
-     */
-    switch (s->mmu_idx) {
-    case ARMMMUIdx_S12NSE1:
-        return ARMMMUIdx_S12NSE0;
-    case ARMMMUIdx_S1SE1:
-        return ARMMMUIdx_S1SE0;
-    case ARMMMUIdx_S2NS:
-        g_assert_not_reached();
-    default:
-        return s->mmu_idx;
-    }
 }
 
 void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
@@ -183,6 +162,15 @@ void aarch64_cpu_dump_state(CPUState *cs, FILE *f,
     }
 }
 
+static int get_mem_index(DisasContext *s)
+{
+#ifdef CONFIG_USER_ONLY
+    return 1;
+#else
+    return s->user;
+#endif
+}
+
 void gen_a64_set_pc_im(uint64_t val)
 {
     tcg_gen_movi_i64(cpu_pc, val);
@@ -222,39 +210,10 @@ static void gen_exception_insn(DisasContext *s, int offset, int excp,
     s->is_jmp = DISAS_EXC;
 }
 
-static void gen_ss_advance(DisasContext *s)
-{
-    /* If the singlestep state is Active-not-pending, advance to
-     * Active-pending.
-     */
-    if (s->ss_active) {
-        s->pstate_ss = 0;
-        gen_helper_clear_pstate_ss(cpu_env);
-    }
-}
-
-static void gen_step_complete_exception(DisasContext *s)
-{
-    /* We just completed step of an insn. Move from Active-not-pending
-     * to Active-pending, and then also take the swstep exception.
-     * This corresponds to making the (IMPDEF) choice to prioritize
-     * swstep exceptions over asynchronous exceptions taken to an exception
-     * level where debug is disabled. This choice has the advantage that
-     * we do not need to maintain internal state corresponding to the
-     * ISV/EX syndrome bits between completion of the step and generation
-     * of the exception, and our syndrome information is always correct.
-     */
-    gen_ss_advance(s);
-    gen_exception(EXCP_UDEF, syn_swstep(s->ss_same_el, 1, s->is_ldex));
-    s->is_jmp = DISAS_EXC;
-}
-
 static inline bool use_goto_tb(DisasContext *s, int n, uint64_t dest)
 {
-    /* No direct tb linking with singlestep (either QEMU's or the ARM
-     * debug architecture kind) or deterministic io
-     */
-    if (s->singlestep_enabled || s->ss_active || (s->tb->cflags & CF_LAST_IO)) {
+    /* No direct tb linking with singlestep or deterministic io */
+    if (s->singlestep_enabled || (s->tb->cflags & CF_LAST_IO)) {
         return false;
     }
 
@@ -278,14 +237,11 @@ static inline void gen_goto_tb(DisasContext *s, int n, uint64_t dest)
         s->is_jmp = DISAS_TB_JUMP;
     } else {
         gen_a64_set_pc_im(dest);
-        if (s->ss_active) {
-            gen_step_complete_exception(s);
-        } else if (s->singlestep_enabled) {
+        if (s->singlestep_enabled) {
             gen_exception_internal(EXCP_DEBUG);
-        } else {
-            tcg_gen_exit_tb(0);
-            s->is_jmp = DISAS_TB_JUMP;
         }
+        tcg_gen_exit_tb(0);
+        s->is_jmp = DISAS_JUMP;
     }
 }
 
@@ -765,6 +721,7 @@ static void do_fp_st(DisasContext *s, int srcidx, TCGv_i64 tcg_addr, int size)
     } else {
         TCGv_i64 tcg_hiaddr = tcg_temp_new_i64();
         tcg_gen_qemu_st_i64(tmp, tcg_addr, get_mem_index(s), MO_TEQ);
+        tcg_gen_qemu_st64(tmp, tcg_addr, get_mem_index(s));
         tcg_gen_ld_i64(tmp, cpu_env, fp_reg_hi_offset(s, srcidx));
         tcg_gen_addi_i64(tcg_hiaddr, tcg_addr, 8);
         tcg_gen_qemu_st_i64(tmp, tcg_hiaddr, get_mem_index(s), MO_TEQ);
@@ -1077,7 +1034,7 @@ static void disas_uncond_b_imm(DisasContext *s, uint32_t insn)
 {
     uint64_t addr = s->pc + sextract32(insn, 0, 26) * 4 - 4;
 
-    if (insn & (1U << 31)) {
+    if (insn & (1 << 31)) {
         /* C5.6.26 BL Branch with link */
         tcg_gen_movi_i64(cpu_reg(s, 30), s->pc);
     }
@@ -1194,8 +1151,6 @@ static void handle_hint(DisasContext *s, uint32_t insn,
         return;
     case 1: /* YIELD */
     case 2: /* WFE */
-        s->is_jmp = DISAS_WFE;
-        return;
     case 4: /* SEV */
     case 5: /* SEVL */
         /* we treat all as NOP at least for now */
@@ -1242,7 +1197,7 @@ static void handle_msr_i(DisasContext *s, uint32_t insn,
     int op = op1 << 3 | op2;
     switch (op) {
     case 0x05: /* SPSel */
-        if (s->current_el == 0) {
+        if (s->current_pl == 0) {
             unallocated_encoding(s);
             return;
         }
@@ -1271,7 +1226,7 @@ static void gen_get_nzcv(TCGv_i64 tcg_rt)
     TCGv_i32 nzcv = tcg_temp_new_i32();
 
     /* build bit 31, N */
-    tcg_gen_andi_i32(nzcv, cpu_NF, (1U << 31));
+    tcg_gen_andi_i32(nzcv, cpu_NF, (1 << 31));
     /* build bit 30, Z */
     tcg_gen_setcondi_i32(TCG_COND_EQ, tmp, cpu_ZF, 0);
     tcg_gen_deposit_i32(nzcv, nzcv, tmp, 30, 1);
@@ -1296,7 +1251,7 @@ static void gen_set_nzcv(TCGv_i64 tcg_rt)
     tcg_gen_trunc_i64_i32(nzcv, tcg_rt);
 
     /* bit 31, N */
-    tcg_gen_andi_i32(cpu_NF, nzcv, (1U << 31));
+    tcg_gen_andi_i32(cpu_NF, nzcv, (1 << 31));
     /* bit 30, Z */
     tcg_gen_andi_i32(cpu_ZF, nzcv, (1 << 30));
     tcg_gen_setcondi_i32(TCG_COND_EQ, cpu_ZF, cpu_ZF, 0);
@@ -1339,7 +1294,7 @@ static void handle_sys(DisasContext *s, uint32_t insn, bool isread,
     }
 
     /* Check access permissions */
-    if (!cp_access_ok(s->current_el, ri, isread)) {
+    if (!cp_access_ok(s->current_pl, ri, isread)) {
         unallocated_encoding(s);
         return;
     }
@@ -1378,7 +1333,7 @@ static void handle_sys(DisasContext *s, uint32_t insn, bool isread,
          * guaranteed to be constant by the tb flags.
          */
         tcg_rt = cpu_reg(s, rt);
-        tcg_gen_movi_i64(tcg_rt, s->current_el << 2);
+        tcg_gen_movi_i64(tcg_rt, s->current_pl << 2);
         return;
     case ARM_CP_DC_ZVA:
         /* Writes clear the aligned block of memory which rt points into. */
@@ -1389,7 +1344,7 @@ static void handle_sys(DisasContext *s, uint32_t insn, bool isread,
         break;
     }
 
-    if ((s->tb->cflags & CF_USE_ICOUNT) && (ri->type & ARM_CP_IO)) {
+    if (use_icount && (ri->type & ARM_CP_IO)) {
         gen_io_start();
     }
 
@@ -1420,7 +1375,7 @@ static void handle_sys(DisasContext *s, uint32_t insn, bool isread,
         }
     }
 
-    if ((s->tb->cflags & CF_USE_ICOUNT) && (ri->type & ARM_CP_IO)) {
+    if (use_icount && (ri->type & ARM_CP_IO)) {
         /* I/O operations must end the TB here (whether read or write) */
         gen_io_end();
         s->is_jmp = DISAS_UPDATE;
@@ -1486,49 +1441,17 @@ static void disas_exc(DisasContext *s, uint32_t insn)
     int opc = extract32(insn, 21, 3);
     int op2_ll = extract32(insn, 0, 5);
     int imm16 = extract32(insn, 5, 16);
-    TCGv_i32 tmp;
 
     switch (opc) {
     case 0:
-        /* For SVC, HVC and SMC we advance the single-step state
-         * machine before taking the exception. This is architecturally
-         * mandated, to ensure that single-stepping a system call
-         * instruction works properly.
+        /* SVC, HVC, SMC; since we don't support the Virtualization
+         * or TrustZone extensions these all UNDEF except SVC.
          */
-        switch (op2_ll) {
-        case 1:
-            gen_ss_advance(s);
-            gen_exception_insn(s, 0, EXCP_SWI, syn_aa64_svc(imm16));
-            break;
-        case 2:
-            if (s->current_el == 0) {
-                unallocated_encoding(s);
-                break;
-            }
-            /* The pre HVC helper handles cases when HVC gets trapped
-             * as an undefined insn by runtime configuration.
-             */
-            gen_a64_set_pc_im(s->pc - 4);
-            gen_helper_pre_hvc(cpu_env);
-            gen_ss_advance(s);
-            gen_exception_insn(s, 0, EXCP_HVC, syn_aa64_hvc(imm16));
-            break;
-        case 3:
-            if (s->current_el == 0) {
-                unallocated_encoding(s);
-                break;
-            }
-            gen_a64_set_pc_im(s->pc - 4);
-            tmp = tcg_const_i32(syn_aa64_smc(imm16));
-            gen_helper_pre_smc(cpu_env, tmp);
-            tcg_temp_free_i32(tmp);
-            gen_ss_advance(s);
-            gen_exception_insn(s, 0, EXCP_SMC, syn_aa64_smc(imm16));
-            break;
-        default:
+        if (op2_ll != 1) {
             unallocated_encoding(s);
             break;
         }
+        gen_exception_insn(s, 0, EXCP_SWI, syn_aa64_svc(imm16));
         break;
     case 1:
         if (op2_ll != 0) {
@@ -1536,7 +1459,7 @@ static void disas_exc(DisasContext *s, uint32_t insn)
             break;
         }
         /* BRK */
-        gen_exception_insn(s, 4, EXCP_BKPT, syn_aa64_bkpt(imm16));
+        gen_exception_insn(s, 0, EXCP_BKPT, syn_aa64_bkpt(imm16));
         break;
     case 2:
         if (op2_ll != 0) {
@@ -1584,17 +1507,11 @@ static void disas_uncond_b_reg(DisasContext *s, uint32_t insn)
     switch (opc) {
     case 0: /* BR */
     case 2: /* RET */
-        tcg_gen_mov_i64(cpu_pc, cpu_reg(s, rn));
         break;
     case 1: /* BLR */
-        tcg_gen_mov_i64(cpu_pc, cpu_reg(s, rn));
         tcg_gen_movi_i64(cpu_reg(s, 30), s->pc);
         break;
     case 4: /* ERET */
-        if (s->current_el == 0) {
-            unallocated_encoding(s);
-            return;
-        }
         gen_helper_exception_return(cpu_env);
         s->is_jmp = DISAS_JUMP;
         return;
@@ -1610,6 +1527,7 @@ static void disas_uncond_b_reg(DisasContext *s, uint32_t insn)
         return;
     }
 
+    tcg_gen_mov_i64(cpu_pc, cpu_reg(s, rn));
     s->is_jmp = DISAS_JUMP;
 }
 
@@ -1808,7 +1726,6 @@ static void disas_ldst_excl(DisasContext *s, uint32_t insn)
 
     if (is_excl) {
         if (!is_store) {
-            s->is_ldex = true;
             gen_load_exclusive(s, rt, rt2, tcg_addr, size, is_pair);
         } else {
             gen_store_exclusive(s, rs, rt, rt2, tcg_addr, size, is_pair);
@@ -1917,7 +1834,7 @@ static void disas_ldst_pair(DisasContext *s, uint32_t insn)
     int rt = extract32(insn, 0, 5);
     int rn = extract32(insn, 5, 5);
     int rt2 = extract32(insn, 10, 5);
-    uint64_t offset = sextract64(insn, 15, 7);
+    int64_t offset = sextract32(insn, 15, 7);
     int index = extract32(insn, 23, 2);
     bool is_vector = extract32(insn, 26, 1);
     bool is_load = extract32(insn, 22, 1);
@@ -2124,7 +2041,7 @@ static void disas_ldst_reg_imm9(DisasContext *s, uint32_t insn)
         }
     } else {
         TCGv_i64 tcg_rt = cpu_reg(s, rt);
-        int memidx = is_unpriv ? get_a64_user_mem_index(s) : get_mem_index(s);
+        int memidx = is_unpriv ? 1 : get_mem_index(s);
 
         if (is_store) {
             do_gpr_st_memidx(s, tcg_rt, tcg_addr, size, memidx);
@@ -2662,12 +2579,11 @@ static void disas_pc_rel_adr(DisasContext *s, uint32_t insn)
 {
     unsigned int page, rd;
     uint64_t base;
-    uint64_t offset;
+    int64_t offset;
 
     page = extract32(insn, 31, 1);
     /* SignExtend(immhi:immlo) -> offset */
-    offset = sextract64(insn, 5, 19);
-    offset = offset << 2 | extract32(insn, 29, 2);
+    offset = ((int64_t)sextract32(insn, 5, 19) << 2) | extract32(insn, 29, 2);
     rd = extract32(insn, 0, 5);
     base = s->pc - 4;
 
@@ -2821,10 +2737,7 @@ static bool logic_imm_decode_wmask(uint64_t *result, unsigned int immn,
      * by r within the element (which is e bits wide)...
      */
     mask = bitmask64(s + 1);
-    if (r) {
-        mask = (mask >> r) | (mask << (e - r));
-        mask &= bitmask64(e);
-    }
+    mask = (mask >> r) | (mask << (e - r));
     /* ...then replicate the element over the whole 64 bit value */
     mask = bitfield_replicate(mask, e);
     *result = mask;
@@ -3863,54 +3776,6 @@ static void handle_shift_reg(DisasContext *s,
     tcg_temp_free_i64(tcg_shift);
 }
 
-/* CRC32[BHWX], CRC32C[BHWX] */
-static void handle_crc32(DisasContext *s,
-                         unsigned int sf, unsigned int sz, bool crc32c,
-                         unsigned int rm, unsigned int rn, unsigned int rd)
-{
-    TCGv_i64 tcg_acc, tcg_val;
-    TCGv_i32 tcg_bytes;
-
-    if (!arm_dc_feature(s, ARM_FEATURE_CRC)
-        || (sf == 1 && sz != 3)
-        || (sf == 0 && sz == 3)) {
-        unallocated_encoding(s);
-        return;
-    }
-
-    if (sz == 3) {
-        tcg_val = cpu_reg(s, rm);
-    } else {
-        uint64_t mask;
-        switch (sz) {
-        case 0:
-            mask = 0xFF;
-            break;
-        case 1:
-            mask = 0xFFFF;
-            break;
-        case 2:
-            mask = 0xFFFFFFFF;
-            break;
-        default:
-            g_assert_not_reached();
-        }
-        tcg_val = new_tmp_a64(s);
-        tcg_gen_andi_i64(tcg_val, cpu_reg(s, rm), mask);
-    }
-
-    tcg_acc = cpu_reg(s, rn);
-    tcg_bytes = tcg_const_i32(1 << sz);
-
-    if (crc32c) {
-        gen_helper_crc32c_64(cpu_reg(s, rd), tcg_acc, tcg_val, tcg_bytes);
-    } else {
-        gen_helper_crc32_64(cpu_reg(s, rd), tcg_acc, tcg_val, tcg_bytes);
-    }
-
-    tcg_temp_free_i32(tcg_bytes);
-}
-
 /* C3.5.8 Data-processing (2 source)
  *   31   30  29 28             21 20  16 15    10 9    5 4    0
  * +----+---+---+-----------------+------+--------+------+------+
@@ -3958,12 +3823,8 @@ static void disas_data_proc_2src(DisasContext *s, uint32_t insn)
     case 21:
     case 22:
     case 23: /* CRC32 */
-    {
-        int sz = extract32(opcode, 0, 2);
-        bool crc32c = extract32(opcode, 2, 1);
-        handle_crc32(s, sf, sz, crc32c, rm, rn, rd);
+        unsupported_encoding(s, insn);
         break;
-    }
     default:
         unallocated_encoding(s);
         break;
@@ -6626,7 +6487,7 @@ static void handle_simd_shift_fpint_conv(DisasContext *s, bool is_scalar,
     tcg_shift = tcg_const_i32(fracbits);
 
     if (is_double) {
-        int maxpass = is_scalar ? 1 : 2;
+        int maxpass = is_scalar ? 1 : is_q ? 2 : 1;
 
         for (pass = 0; pass < maxpass; pass++) {
             TCGv_i64 tcg_op = tcg_temp_new_i64();
@@ -8715,7 +8576,7 @@ static void disas_simd_three_reg_diff(DisasContext *s, uint32_t insn)
             return;
         }
         if (size == 3) {
-            if (!arm_dc_feature(s, ARM_FEATURE_V8_PMULL)) {
+            if (!arm_dc_feature(s, ARM_FEATURE_V8_AES)) {
                 unallocated_encoding(s);
                 return;
             }
@@ -9139,8 +9000,7 @@ static void disas_simd_3same_int(DisasContext *s, uint32_t insn)
     }
 
     if (size == 3) {
-        assert(is_q);
-        for (pass = 0; pass < 2; pass++) {
+        for (pass = 0; pass < (is_q ? 2 : 1); pass++) {
             TCGv_i64 tcg_op1 = tcg_temp_new_i64();
             TCGv_i64 tcg_op2 = tcg_temp_new_i64();
             TCGv_i64 tcg_res = tcg_temp_new_i64();
@@ -10639,55 +10499,7 @@ static void disas_simd_indexed(DisasContext *s, uint32_t insn)
  */
 static void disas_crypto_aes(DisasContext *s, uint32_t insn)
 {
-    int size = extract32(insn, 22, 2);
-    int opcode = extract32(insn, 12, 5);
-    int rn = extract32(insn, 5, 5);
-    int rd = extract32(insn, 0, 5);
-    int decrypt;
-    TCGv_i32 tcg_rd_regno, tcg_rn_regno, tcg_decrypt;
-    CryptoThreeOpEnvFn *genfn;
-
-    if (!arm_dc_feature(s, ARM_FEATURE_V8_AES)
-        || size != 0) {
-        unallocated_encoding(s);
-        return;
-    }
-
-    switch (opcode) {
-    case 0x4: /* AESE */
-        decrypt = 0;
-        genfn = gen_helper_crypto_aese;
-        break;
-    case 0x6: /* AESMC */
-        decrypt = 0;
-        genfn = gen_helper_crypto_aesmc;
-        break;
-    case 0x5: /* AESD */
-        decrypt = 1;
-        genfn = gen_helper_crypto_aese;
-        break;
-    case 0x7: /* AESIMC */
-        decrypt = 1;
-        genfn = gen_helper_crypto_aesmc;
-        break;
-    default:
-        unallocated_encoding(s);
-        return;
-    }
-
-    /* Note that we convert the Vx register indexes into the
-     * index within the vfp.regs[] array, so we can share the
-     * helper with the AArch32 instructions.
-     */
-    tcg_rd_regno = tcg_const_i32(rd << 1);
-    tcg_rn_regno = tcg_const_i32(rn << 1);
-    tcg_decrypt = tcg_const_i32(decrypt);
-
-    genfn(cpu_env, tcg_rd_regno, tcg_rn_regno, tcg_decrypt);
-
-    tcg_temp_free_i32(tcg_rd_regno);
-    tcg_temp_free_i32(tcg_rn_regno);
-    tcg_temp_free_i32(tcg_decrypt);
+    unsupported_encoding(s, insn);
 }
 
 /* C3.6.20 Crypto three-reg SHA
@@ -10698,64 +10510,7 @@ static void disas_crypto_aes(DisasContext *s, uint32_t insn)
  */
 static void disas_crypto_three_reg_sha(DisasContext *s, uint32_t insn)
 {
-    int size = extract32(insn, 22, 2);
-    int opcode = extract32(insn, 12, 3);
-    int rm = extract32(insn, 16, 5);
-    int rn = extract32(insn, 5, 5);
-    int rd = extract32(insn, 0, 5);
-    CryptoThreeOpEnvFn *genfn;
-    TCGv_i32 tcg_rd_regno, tcg_rn_regno, tcg_rm_regno;
-    int feature = ARM_FEATURE_V8_SHA256;
-
-    if (size != 0) {
-        unallocated_encoding(s);
-        return;
-    }
-
-    switch (opcode) {
-    case 0: /* SHA1C */
-    case 1: /* SHA1P */
-    case 2: /* SHA1M */
-    case 3: /* SHA1SU0 */
-        genfn = NULL;
-        feature = ARM_FEATURE_V8_SHA1;
-        break;
-    case 4: /* SHA256H */
-        genfn = gen_helper_crypto_sha256h;
-        break;
-    case 5: /* SHA256H2 */
-        genfn = gen_helper_crypto_sha256h2;
-        break;
-    case 6: /* SHA256SU1 */
-        genfn = gen_helper_crypto_sha256su1;
-        break;
-    default:
-        unallocated_encoding(s);
-        return;
-    }
-
-    if (!arm_dc_feature(s, feature)) {
-        unallocated_encoding(s);
-        return;
-    }
-
-    tcg_rd_regno = tcg_const_i32(rd << 1);
-    tcg_rn_regno = tcg_const_i32(rn << 1);
-    tcg_rm_regno = tcg_const_i32(rm << 1);
-
-    if (genfn) {
-        genfn(cpu_env, tcg_rd_regno, tcg_rn_regno, tcg_rm_regno);
-    } else {
-        TCGv_i32 tcg_opcode = tcg_const_i32(opcode);
-
-        gen_helper_crypto_sha1_3reg(cpu_env, tcg_rd_regno,
-                                    tcg_rn_regno, tcg_rm_regno, tcg_opcode);
-        tcg_temp_free_i32(tcg_opcode);
-    }
-
-    tcg_temp_free_i32(tcg_rd_regno);
-    tcg_temp_free_i32(tcg_rn_regno);
-    tcg_temp_free_i32(tcg_rm_regno);
+    unsupported_encoding(s, insn);
 }
 
 /* C3.6.21 Crypto two-reg SHA
@@ -10766,49 +10521,7 @@ static void disas_crypto_three_reg_sha(DisasContext *s, uint32_t insn)
  */
 static void disas_crypto_two_reg_sha(DisasContext *s, uint32_t insn)
 {
-    int size = extract32(insn, 22, 2);
-    int opcode = extract32(insn, 12, 5);
-    int rn = extract32(insn, 5, 5);
-    int rd = extract32(insn, 0, 5);
-    CryptoTwoOpEnvFn *genfn;
-    int feature;
-    TCGv_i32 tcg_rd_regno, tcg_rn_regno;
-
-    if (size != 0) {
-        unallocated_encoding(s);
-        return;
-    }
-
-    switch (opcode) {
-    case 0: /* SHA1H */
-        feature = ARM_FEATURE_V8_SHA1;
-        genfn = gen_helper_crypto_sha1h;
-        break;
-    case 1: /* SHA1SU1 */
-        feature = ARM_FEATURE_V8_SHA1;
-        genfn = gen_helper_crypto_sha1su1;
-        break;
-    case 2: /* SHA256SU0 */
-        feature = ARM_FEATURE_V8_SHA256;
-        genfn = gen_helper_crypto_sha256su0;
-        break;
-    default:
-        unallocated_encoding(s);
-        return;
-    }
-
-    if (!arm_dc_feature(s, feature)) {
-        unallocated_encoding(s);
-        return;
-    }
-
-    tcg_rd_regno = tcg_const_i32(rd << 1);
-    tcg_rn_regno = tcg_const_i32(rn << 1);
-
-    genfn(cpu_env, tcg_rd_regno, tcg_rn_regno);
-
-    tcg_temp_free_i32(tcg_rd_regno);
-    tcg_temp_free_i32(tcg_rn_regno);
+    unsupported_encoding(s, insn);
 }
 
 /* C3.6 Data processing - SIMD, inc Crypto
@@ -10920,6 +10633,7 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
     CPUARMState *env = &cpu->env;
     DisasContext dc1, *dc = &dc1;
     CPUBreakpoint *bp;
+    uint16_t *gen_opc_end;
     int j, lj;
     target_ulong pc_start;
     target_ulong next_page_start;
@@ -10929,6 +10643,8 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
     pc_start = tb->pc;
 
     dc->tb = tb;
+
+    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
 
     dc->is_jmp = DISAS_NEXT;
     dc->pc = pc_start;
@@ -10940,36 +10656,15 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
     dc->bswap_code = 0;
     dc->condexec_mask = 0;
     dc->condexec_cond = 0;
-    dc->mmu_idx = ARM_TBFLAG_MMUIDX(tb->flags);
-    dc->current_el = arm_mmu_idx_to_el(dc->mmu_idx);
 #if !defined(CONFIG_USER_ONLY)
-    dc->user = (dc->current_el == 0);
+    dc->user = (ARM_TBFLAG_AA64_EL(tb->flags) == 0);
 #endif
     dc->cpacr_fpen = ARM_TBFLAG_AA64_FPEN(tb->flags);
     dc->vec_len = 0;
     dc->vec_stride = 0;
     dc->cp_regs = cpu->cp_regs;
+    dc->current_pl = arm_current_pl(env);
     dc->features = env->features;
-
-    /* Single step state. The code-generation logic here is:
-     *  SS_ACTIVE == 0:
-     *   generate code with no special handling for single-stepping (except
-     *   that anything that can make us go to SS_ACTIVE == 1 must end the TB;
-     *   this happens anyway because those changes are all system register or
-     *   PSTATE writes).
-     *  SS_ACTIVE == 1, PSTATE.SS == 1: (active-not-pending)
-     *   emit code for one insn
-     *   emit code to clear PSTATE.SS
-     *   emit code to generate software step exception for completed step
-     *   end TB (as usual for having generated an exception)
-     *  SS_ACTIVE == 1, PSTATE.SS == 0: (active-pending)
-     *   emit code to generate a software step exception
-     *   end the TB
-     */
-    dc->ss_active = ARM_TBFLAG_AA64_SS_ACTIVE(tb->flags);
-    dc->pstate_ss = ARM_TBFLAG_AA64_PSTATE_SS(tb->flags);
-    dc->is_ldex = false;
-    dc->ss_same_el = (arm_debug_target_el(env) == dc->current_el);
 
     init_tmp_a64_array(dc);
 
@@ -10981,7 +10676,7 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
         max_insns = CF_COUNT_MASK;
     }
 
-    gen_tb_start(tb);
+    gen_tb_start();
 
     tcg_clear_temp_count();
 
@@ -10999,7 +10694,7 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
         }
 
         if (search_pc) {
-            j = tcg_op_buf_count();
+            j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
             if (lj < j) {
                 lj++;
                 while (lj < j) {
@@ -11019,23 +10714,6 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
             tcg_gen_debug_insn_start(dc->pc);
         }
 
-        if (dc->ss_active && !dc->pstate_ss) {
-            /* Singlestep state is Active-pending.
-             * If we're in this state at the start of a TB then either
-             *  a) we just took an exception to an EL which is being debugged
-             *     and this is the first insn in the exception handler
-             *  b) debug exceptions were masked and we just unmasked them
-             *     without changing EL (eg by clearing PSTATE.D)
-             * In either case we're going to take a swstep exception in the
-             * "did not step an insn" case, and so the syndrome ISV and EX
-             * bits should be zero.
-             */
-            assert(num_insns == 0);
-            gen_exception(EXCP_UDEF, syn_swstep(dc->ss_same_el, 0, 0));
-            dc->is_jmp = DISAS_EXC;
-            break;
-        }
-
         disas_a64_insn(env, dc);
 
         if (tcg_check_temp_count()) {
@@ -11049,10 +10727,9 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
          * ensures prefetch aborts occur at the right place.
          */
         num_insns++;
-    } while (!dc->is_jmp && !tcg_op_buf_full() &&
+    } while (!dc->is_jmp && tcg_ctx.gen_opc_ptr < gen_opc_end &&
              !cs->singlestep_enabled &&
              !singlestep &&
-             !dc->ss_active &&
              dc->pc < next_page_start &&
              num_insns < max_insns);
 
@@ -11060,8 +10737,7 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
         gen_io_end();
     }
 
-    if (unlikely(cs->singlestep_enabled || dc->ss_active)
-        && dc->is_jmp != DISAS_EXC) {
+    if (unlikely(cs->singlestep_enabled) && dc->is_jmp != DISAS_EXC) {
         /* Note that this means single stepping WFI doesn't halt the CPU.
          * For conditional branch insns this is harmless unreachable code as
          * gen_goto_tb() has already handled emitting the debug exception
@@ -11071,11 +10747,7 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
         if (dc->is_jmp != DISAS_JUMP) {
             gen_a64_set_pc_im(dc->pc);
         }
-        if (cs->singlestep_enabled) {
-            gen_exception_internal(EXCP_DEBUG);
-        } else {
-            gen_step_complete_exception(dc);
-        }
+        gen_exception_internal(EXCP_DEBUG);
     } else {
         switch (dc->is_jmp) {
         case DISAS_NEXT:
@@ -11093,10 +10765,6 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
         case DISAS_EXC:
         case DISAS_SWI:
             break;
-        case DISAS_WFE:
-            gen_a64_set_pc_im(dc->pc);
-            gen_helper_wfe(cpu_env);
-            break;
         case DISAS_WFI:
             /* This is a special case because we don't want to just halt the CPU
              * if trying to debug across a WFI.
@@ -11109,6 +10777,7 @@ void gen_intermediate_code_internal_a64(ARMCPU *cpu,
 
 done_generating:
     gen_tb_end(tb, num_insns);
+    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
 
 #ifdef DEBUG_DISAS
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
@@ -11120,7 +10789,7 @@ done_generating:
     }
 #endif
     if (search_pc) {
-        j = tcg_op_buf_count();
+        j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
         lj++;
         while (lj <= j) {
             tcg_ctx.gen_opc_instr_start[lj++] = 0;

@@ -19,10 +19,13 @@
 
 #include <math.h>
 #include "cpu.h"
-#include "exec/helper-proto.h"
+#include "helper.h"
 #include "qemu/aes.h"
 #include "qemu/host-utils.h"
-#include "exec/cpu_ldst.h"
+
+#if !defined(CONFIG_USER_ONLY)
+#include "exec/softmmu_exec.h"
+#endif /* !defined(CONFIG_USER_ONLY) */
 
 #define FPU_RC_MASK         0xc00
 #define FPU_RC_NEAR         0x000
@@ -251,34 +254,16 @@ int32_t helper_fist_ST0(CPUX86State *env)
 int32_t helper_fistl_ST0(CPUX86State *env)
 {
     int32_t val;
-    signed char old_exp_flags;
-
-    old_exp_flags = get_float_exception_flags(&env->fp_status);
-    set_float_exception_flags(0, &env->fp_status);
 
     val = floatx80_to_int32(ST0, &env->fp_status);
-    if (get_float_exception_flags(&env->fp_status) & float_flag_invalid) {
-        val = 0x80000000;
-    }
-    set_float_exception_flags(get_float_exception_flags(&env->fp_status)
-                                | old_exp_flags, &env->fp_status);
     return val;
 }
 
 int64_t helper_fistll_ST0(CPUX86State *env)
 {
     int64_t val;
-    signed char old_exp_flags;
 
-    old_exp_flags = get_float_exception_flags(&env->fp_status);
-    set_float_exception_flags(0, &env->fp_status);
-
-    val = floatx80_to_int32(ST0, &env->fp_status);
-    if (get_float_exception_flags(&env->fp_status) & float_flag_invalid) {
-        val = 0x8000000000000000ULL;
-    }
-    set_float_exception_flags(get_float_exception_flags(&env->fp_status)
-                                | old_exp_flags, &env->fp_status);
+    val = floatx80_to_int64(ST0, &env->fp_status);
     return val;
 }
 
@@ -555,7 +540,7 @@ uint32_t helper_fnstcw(CPUX86State *env)
     return env->fpuc;
 }
 
-void update_fp_status(CPUX86State *env)
+static void update_fp_status(CPUX86State *env)
 {
     int rnd_type;
 
@@ -593,7 +578,8 @@ void update_fp_status(CPUX86State *env)
 
 void helper_fldcw(CPUX86State *env, uint32_t val)
 {
-    cpu_set_fpuc(env, val);
+    env->fpuc = val;
+    update_fp_status(env);
 }
 
 void helper_fclex(CPUX86State *env)
@@ -612,7 +598,7 @@ void helper_fninit(CPUX86State *env)
 {
     env->fpus = 0;
     env->fpstt = 0;
-    cpu_set_fpuc(env, 0x37f);
+    env->fpuc = 0x37f;
     env->fptags[0] = 1;
     env->fptags[1] = 1;
     env->fptags[2] = 1;
@@ -639,7 +625,7 @@ void helper_fbld_ST0(CPUX86State *env, target_ulong ptr)
     }
     tmp = int64_to_floatx80(val, &env->fp_status);
     if (cpu_ldub_data(env, ptr + 9) & 0x80) {
-        tmp = floatx80_chs(tmp);
+        floatx80_chs(tmp);
     }
     fpush(env);
     ST0 = tmp;
@@ -1030,11 +1016,11 @@ void helper_fldenv(CPUX86State *env, target_ulong ptr, int data32)
     int i, fpus, fptag;
 
     if (data32) {
-        cpu_set_fpuc(env, cpu_lduw_data(env, ptr));
+        env->fpuc = cpu_lduw_data(env, ptr);
         fpus = cpu_lduw_data(env, ptr + 4);
         fptag = cpu_lduw_data(env, ptr + 8);
     } else {
-        cpu_set_fpuc(env, cpu_lduw_data(env, ptr));
+        env->fpuc = cpu_lduw_data(env, ptr);
         fpus = cpu_lduw_data(env, ptr + 2);
         fptag = cpu_lduw_data(env, ptr + 4);
     }
@@ -1063,7 +1049,7 @@ void helper_fsave(CPUX86State *env, target_ulong ptr, int data32)
     /* fninit */
     env->fpus = 0;
     env->fpstt = 0;
-    cpu_set_fpuc(env, 0x37f);
+    env->fpuc = 0x37f;
     env->fptags[0] = 1;
     env->fptags[1] = 1;
     env->fptags[2] = 1;
@@ -1174,7 +1160,7 @@ void helper_fxrstor(CPUX86State *env, target_ulong ptr, int data64)
         raise_exception(env, EXCP0D_GPF);
     }
 
-    cpu_set_fpuc(env, cpu_lduw_data(env, ptr));
+    env->fpuc = cpu_lduw_data(env, ptr);
     fpus = cpu_lduw_data(env, ptr + 2);
     fptag = cpu_lduw_data(env, ptr + 4);
     env->fpstt = (fpus >> 11) & 7;
@@ -1272,12 +1258,6 @@ void cpu_set_mxcsr(CPUX86State *env, uint32_t mxcsr)
 
     /* set flush to zero */
     set_flush_to_zero((mxcsr & SSE_FZ) ? 1 : 0, &env->fp_status);
-}
-
-void cpu_set_fpuc(CPUX86State *env, uint16_t val)
-{
-    env->fpuc = val;
-    update_fp_status(env);
 }
 
 void helper_ldmxcsr(CPUX86State *env, uint32_t val)

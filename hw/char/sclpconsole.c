@@ -36,7 +36,6 @@ typedef struct SCLPConsole {
     uint32_t iov_bs;        /* offset in buf for char layer read operation */
     uint32_t iov_data_len;  /* length of byte stream in buffer             */
     uint32_t iov_sclp_rest; /* length of byte stream not read via SCLP     */
-    bool notify;            /* qemu_notify_event() req'd if true           */
 } SCLPConsole;
 
 /* character layer call-back functions */
@@ -45,12 +44,8 @@ typedef struct SCLPConsole {
 static int chr_can_read(void *opaque)
 {
     SCLPConsole *scon = opaque;
-    int avail = SIZE_BUFFER_VT220 - scon->iov_data_len;
 
-    if (avail == 0) {
-        scon->notify = true;
-    }
-    return avail;
+    return SIZE_BUFFER_VT220 - scon->iov_data_len;
 }
 
 /* Send data from a char device over to the guest */
@@ -117,10 +112,6 @@ static void get_console_data(SCLPEvent *event, uint8_t *buf, size_t *size,
         cons->iov_sclp_rest -= avail;
         cons->iov_sclp += avail;
         /* more data pending */
-    }
-    if (cons->notify) {
-        cons->notify = false;
-        qemu_notify_event();
     }
 }
 
@@ -194,7 +185,8 @@ static const VMStateDescription vmstate_sclpconsole = {
     .name = "sclpconsole",
     .version_id = 0,
     .minimum_version_id = 0,
-    .fields = (VMStateField[]) {
+    .minimum_version_id_old = 0,
+    .fields      = (VMStateField[]) {
         VMSTATE_BOOL(event.event_pending, SCLPConsole),
         VMSTATE_UINT8_ARRAY(iov, SCLPConsole, SIZE_BUFFER_VT220),
         VMSTATE_UINT32(iov_sclp, SCLPConsole),
@@ -238,7 +230,6 @@ static void console_reset(DeviceState *dev)
    scon->iov_bs = 0;
    scon->iov_data_len = 0;
    scon->iov_sclp_rest = 0;
-   scon->notify = false;
 }
 
 static int console_exit(SCLPEvent *event)

@@ -16,11 +16,11 @@
 
 /* Board init.  */
 
-static void dummy_m68k_init(MachineState *machine)
+static void dummy_m68k_init(QEMUMachineInitArgs *args)
 {
-    ram_addr_t ram_size = machine->ram_size;
-    const char *cpu_model = machine->cpu_model;
-    const char *kernel_filename = machine->kernel_filename;
+    ram_addr_t ram_size = args->ram_size;
+    const char *cpu_model = args->cpu_model;
+    const char *kernel_filename = args->kernel_filename;
     CPUM68KState *env;
     MemoryRegion *address_space_mem =  get_system_memory();
     MemoryRegion *ram = g_new(MemoryRegion, 1);
@@ -40,7 +40,7 @@ static void dummy_m68k_init(MachineState *machine)
     env->vbr = 0;
 
     /* RAM at address zero */
-    memory_region_init_ram(ram, NULL, "dummy_m68k.ram", ram_size, &error_abort);
+    memory_region_init_ram(ram, NULL, "dummy_m68k.ram", ram_size);
     vmstate_register_ram_global(ram);
     memory_region_add_subregion(address_space_mem, 0, ram);
 
@@ -50,8 +50,7 @@ static void dummy_m68k_init(MachineState *machine)
                                NULL, NULL, 1, ELF_MACHINE, 0);
         entry = elf_entry;
         if (kernel_size < 0) {
-            kernel_size = load_uimage(kernel_filename, &entry, NULL, NULL,
-                                      NULL, NULL);
+            kernel_size = load_uimage(kernel_filename, &entry, NULL, NULL);
         }
         if (kernel_size < 0) {
             kernel_size = load_image_targphys(kernel_filename,

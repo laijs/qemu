@@ -187,7 +187,6 @@ struct IntelHDAState {
     /* properties */
     uint32_t debug;
     uint32_t msi;
-    bool old_msi_addr;
 };
 
 #define TYPE_INTEL_HDA_GENERIC "intel-hda-generic"
@@ -246,7 +245,7 @@ static void intel_hda_update_int_sts(IntelHDAState *d)
 
     /* update global status */
     if (sts & d->int_ctl) {
-        sts |= (1U << 31);
+        sts |= (1 << 31);
     }
 
     d->int_sts = sts;
@@ -258,7 +257,7 @@ static void intel_hda_update_irq(IntelHDAState *d)
     int level;
 
     intel_hda_update_int_sts(d);
-    if (d->int_sts & (1U << 31) && d->int_ctl & (1U << 31)) {
+    if (d->int_sts & (1 << 31) && d->int_ctl & (1 << 31)) {
         level = 1;
     } else {
         level = 0;
@@ -575,7 +574,7 @@ static void intel_hda_set_st_ctl(IntelHDAState *d, const IntelHDAReg *reg, uint3
     if (st->ctl & 0x01) {
         /* reset */
         dprint(d, 1, "st #%d: reset\n", reg->stream);
-        st->ctl = SD_STS_FIFO_READY << 24;
+        st->ctl = 0;
     }
     if ((st->ctl & 0x02) != (old & 0x02)) {
         uint32_t stnr = (st->ctl >> 20) & 0x0f;
@@ -830,7 +829,6 @@ static const struct IntelHDAReg regtab[] = {
         .wclear   = 0x1c000000,                                       \
         .offset   = offsetof(IntelHDAState, st[_i].ctl),              \
         .whandler = intel_hda_set_st_ctl,                             \
-        .reset    = SD_STS_FIFO_READY << 24                           \
     },                                                                \
     [ ST_REG(_i, ICH6_REG_SD_LPIB) ] = {                              \
         .stream   = _i,                                               \
@@ -1142,7 +1140,7 @@ static int intel_hda_init(PCIDevice *pci)
                           "intel-hda", 0x4000);
     pci_register_bar(&d->pci, 0, 0, &d->mmio);
     if (d->msi) {
-        msi_init(&d->pci, d->old_msi_addr ? 0x50 : 0x60, 1, true, false);
+        msi_init(&d->pci, 0x50, 1, true, false);
     }
 
     hda_codec_bus_init(DEVICE(pci), &d->codecs, sizeof(d->codecs),
@@ -1156,6 +1154,7 @@ static void intel_hda_exit(PCIDevice *pci)
     IntelHDAState *d = INTEL_HDA(pci);
 
     msi_uninit(&d->pci);
+    memory_region_destroy(&d->mmio);
 }
 
 static int intel_hda_post_load(void *opaque, int version)
@@ -1176,7 +1175,7 @@ static int intel_hda_post_load(void *opaque, int version)
 static const VMStateDescription vmstate_intel_hda_stream = {
     .name = "intel-hda-stream",
     .version_id = 1,
-    .fields = (VMStateField[]) {
+    .fields = (VMStateField []) {
         VMSTATE_UINT32(ctl, IntelHDAStream),
         VMSTATE_UINT32(lpib, IntelHDAStream),
         VMSTATE_UINT32(cbl, IntelHDAStream),
@@ -1192,7 +1191,7 @@ static const VMStateDescription vmstate_intel_hda = {
     .name = "intel-hda",
     .version_id = 1,
     .post_load = intel_hda_post_load,
-    .fields = (VMStateField[]) {
+    .fields = (VMStateField []) {
         VMSTATE_PCI_DEVICE(pci, IntelHDAState),
 
         /* registers */
@@ -1236,7 +1235,6 @@ static const VMStateDescription vmstate_intel_hda = {
 static Property intel_hda_properties[] = {
     DEFINE_PROP_UINT32("debug", IntelHDAState, debug, 0),
     DEFINE_PROP_UINT32("msi", IntelHDAState, msi, 1),
-    DEFINE_PROP_BOOL("old_msi_addr", IntelHDAState, old_msi_addr, false),
     DEFINE_PROP_END_OF_LIST(),
 };
 

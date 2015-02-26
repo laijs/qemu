@@ -36,7 +36,7 @@
 
 typedef struct SuperIOConfig
 {
-    uint8_t config[0x100];
+    uint8_t config[0xff];
     uint8_t index;
     uint8_t data;
 } SuperIOConfig;
@@ -50,13 +50,13 @@ typedef struct VT82C686BState {
 static void superio_ioport_writeb(void *opaque, hwaddr addr, uint64_t data,
                                   unsigned size)
 {
+    int can_write;
     SuperIOConfig *superio_conf = opaque;
 
     DPRINTF("superio_ioport_writeb  address 0x%x  val 0x%x\n", addr, data);
     if (addr == 0x3f0) {
         superio_conf->index = data & 0xff;
     } else {
-        bool can_write = true;
         /* 0x3f1 */
         switch (superio_conf->index) {
         case 0x00 ... 0xdf:
@@ -68,27 +68,30 @@ static void superio_ioport_writeb(void *opaque, hwaddr addr, uint64_t data,
         case 0xf7:
         case 0xf9 ... 0xfb:
         case 0xfd ... 0xff:
-            can_write = false;
-            break;
-        case 0xe7:
-            if ((data & 0xff) != 0xfe) {
-                DPRINTF("change uart 1 base. unsupported yet\n");
-                can_write = false;
-            }
-            break;
-        case 0xe8:
-            if ((data & 0xff) != 0xbe) {
-                DPRINTF("change uart 2 base. unsupported yet\n");
-                can_write = false;
-            }
+            can_write = 0;
             break;
         default:
-            break;
+            can_write = 1;
 
+            if (can_write) {
+                switch (superio_conf->index) {
+                case 0xe7:
+                    if ((data & 0xff) != 0xfe) {
+                        DPRINTF("chage uart 1 base. unsupported yet\n");
+                    }
+                    break;
+                case 0xe8:
+                    if ((data & 0xff) != 0xbe) {
+                        DPRINTF("chage uart 2 base. unsupported yet\n");
+                    }
+                    break;
+
+                default:
+                    superio_conf->config[superio_conf->index] = data & 0xff;
+                }
+            }
         }
-        if (can_write) {
-            superio_conf->config[superio_conf->index] = data & 0xff;
-        }
+        superio_conf->config[superio_conf->index] = data & 0xff;
     }
 }
 
@@ -227,14 +230,15 @@ static const VMStateDescription vmstate_acpi = {
     .name = "vt82c686b_pm",
     .version_id = 1,
     .minimum_version_id = 1,
+    .minimum_version_id_old = 1,
     .post_load = vmstate_acpi_post_load,
-    .fields = (VMStateField[]) {
+    .fields      = (VMStateField []) {
         VMSTATE_PCI_DEVICE(dev, VT686PMState),
         VMSTATE_UINT16(ar.pm1.evt.sts, VT686PMState),
         VMSTATE_UINT16(ar.pm1.evt.en, VT686PMState),
         VMSTATE_UINT16(ar.pm1.cnt.cnt, VT686PMState),
         VMSTATE_STRUCT(apm, VT686PMState, 0, vmstate_apm, APMState),
-        VMSTATE_TIMER_PTR(ar.tmr.timer, VT686PMState),
+        VMSTATE_TIMER(ar.tmr.timer, VT686PMState),
         VMSTATE_INT64(ar.tmr.overflow_time, VT686PMState),
         VMSTATE_END_OF_LIST()
     }
@@ -414,7 +418,8 @@ static const VMStateDescription vmstate_via = {
     .name = "vt82c686b",
     .version_id = 1,
     .minimum_version_id = 1,
-    .fields = (VMStateField[]) {
+    .minimum_version_id_old = 1,
+    .fields      = (VMStateField []) {
         VMSTATE_PCI_DEVICE(dev, VT82C686BState),
         VMSTATE_END_OF_LIST()
     }
@@ -429,8 +434,7 @@ static int vt82c686b_initfn(PCIDevice *d)
     uint8_t *wmask;
     int i;
 
-    isa_bus = isa_bus_new(DEVICE(d), get_system_memory(),
-                          pci_address_space_io(d));
+    isa_bus = isa_bus_new(&d->qdev, pci_address_space_io(d));
 
     pci_conf = d->config;
     pci_config_set_prog_interface(pci_conf, 0x0);

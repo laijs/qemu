@@ -28,7 +28,6 @@
 #ifndef CPU_XTENSA_H
 #define CPU_XTENSA_H
 
-#define ALIGNED_ONLY
 #define TARGET_LONG_BITS 32
 #define ELF_MACHINE EM_XTENSA
 
@@ -38,6 +37,8 @@
 #include "qemu-common.h"
 #include "exec/cpu-defs.h"
 #include "fpu/softfloat.h"
+
+#define TARGET_HAS_ICE 1
 
 #define NB_MMU_MODES 4
 
@@ -264,7 +265,6 @@ typedef enum {
     INTTYPE_TIMER,
     INTTYPE_DEBUG,
     INTTYPE_WRITE_ERR,
-    INTTYPE_PROFILING,
     INTTYPE_MAX
 } interrupt_type;
 
@@ -389,7 +389,7 @@ static inline CPUXtensaState *cpu_init(const char *cpu_model)
 }
 
 void xtensa_translate_init(void);
-void xtensa_breakpoint_handler(CPUState *cs);
+void xtensa_breakpoint_handler(CPUXtensaState *env);
 int cpu_xtensa_exec(CPUXtensaState *s);
 void xtensa_register_core(XtensaConfigList *node);
 void check_interrupts(CPUXtensaState *s);
@@ -470,12 +470,6 @@ static inline xtensa_tlb_entry *xtensa_tlb_get_entry(CPUXtensaState *env,
         env->itlb[wi] + ei;
 }
 
-static inline uint32_t xtensa_replicate_windowstart(CPUXtensaState *env)
-{
-    return env->sregs[WINDOW_START] |
-        (env->sregs[WINDOW_START] << env->config->nareg / 4);
-}
-
 /* MMU modes definitions */
 #define MMU_MODE0_SUFFIX _ring0
 #define MMU_MODE1_SUFFIX _ring1
@@ -495,8 +489,6 @@ static inline int cpu_mmu_index(CPUXtensaState *env)
 #define XTENSA_TBFLAG_CPENABLE_MASK 0x3fc0
 #define XTENSA_TBFLAG_CPENABLE_SHIFT 6
 #define XTENSA_TBFLAG_EXCEPTION 0x4000
-#define XTENSA_TBFLAG_WINDOW_MASK 0x18000
-#define XTENSA_TBFLAG_WINDOW_SHIFT 15
 
 static inline void cpu_get_tb_cpu_state(CPUXtensaState *env, target_ulong *pc,
         target_ulong *cs_base, int *flags)
@@ -527,16 +519,6 @@ static inline void cpu_get_tb_cpu_state(CPUXtensaState *env, target_ulong *pc,
     }
     if (cs->singlestep_enabled && env->exception_taken) {
         *flags |= XTENSA_TBFLAG_EXCEPTION;
-    }
-    if (xtensa_option_enabled(env->config, XTENSA_OPTION_WINDOWED_REGISTER) &&
-        (env->sregs[PS] & (PS_WOE | PS_EXCM)) == PS_WOE) {
-        uint32_t windowstart = xtensa_replicate_windowstart(env) >>
-            (env->sregs[WINDOW_BASE] + 1);
-        uint32_t w = ctz32(windowstart | 0x8);
-
-        *flags |= w << XTENSA_TBFLAG_WINDOW_SHIFT;
-    } else {
-        *flags |= 3 << XTENSA_TBFLAG_WINDOW_SHIFT;
     }
 }
 

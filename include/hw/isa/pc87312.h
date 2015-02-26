@@ -47,10 +47,13 @@ typedef struct PC87312State {
 
     struct {
         ISADevice *dev;
+        BlockDriverState *drive[2];
+        uint32_t base;
     } fdc;
 
     struct {
         ISADevice *dev;
+        uint32_t base;
     } ide;
 
     MemoryRegion io;

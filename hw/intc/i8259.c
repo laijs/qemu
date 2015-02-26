@@ -265,8 +265,7 @@ static void pic_ioport_write(void *opaque, hwaddr addr64,
             s->init4 = val & 1;
             s->single_mode = val & 2;
             if (val & 0x08) {
-                qemu_log_mask(LOG_UNIMP,
-                              "i8259: level sensitive irq not supported\n");
+                hw_error("level sensitive irq not supported");
             }
         } else if (val & 0x08) {
             if (val & 0x04) {
@@ -370,7 +369,7 @@ static uint64_t pic_ioport_read(void *opaque, hwaddr addr,
             ret = s->imr;
         }
     }
-    DPRINTF("read: addr=0x%02" HWADDR_PRIx " val=0x%02x\n", addr, ret);
+    DPRINTF("read: addr=0x%02x val=0x%02x\n", addr, ret);
     return ret;
 }
 
@@ -413,7 +412,7 @@ static const MemoryRegionOps pic_elcr_ioport_ops = {
     },
 };
 
-static void pic_realize(DeviceState *dev, Error **errp)
+static void pic_realize(DeviceState *dev, Error **err)
 {
     PICCommonState *s = PIC_COMMON(dev);
     PICClass *pc = PIC_GET_CLASS(dev);
@@ -426,10 +425,10 @@ static void pic_realize(DeviceState *dev, Error **errp)
     qdev_init_gpio_out(dev, s->int_out, ARRAY_SIZE(s->int_out));
     qdev_init_gpio_in(dev, pic_set_irq, 8);
 
-    pc->parent_realize(dev, errp);
+    pc->parent_realize(dev, err);
 }
 
-void hmp_info_pic(Monitor *mon, const QDict *qdict)
+void pic_info(Monitor *mon, const QDict *qdict)
 {
     int i;
     PICCommonState *s;
@@ -447,7 +446,7 @@ void hmp_info_pic(Monitor *mon, const QDict *qdict)
     }
 }
 
-void hmp_info_irq(Monitor *mon, const QDict *qdict)
+void irq_info(Monitor *mon, const QDict *qdict)
 {
 #ifndef DEBUG_IRQ_COUNT
     monitor_printf(mon, "irq statistic code not compiled.\n");
@@ -472,7 +471,7 @@ qemu_irq *i8259_init(ISABus *bus, qemu_irq parent_irq)
     ISADevice *isadev;
     int i;
 
-    irq_set = g_new0(qemu_irq, ISA_NUM_IRQS);
+    irq_set = g_malloc(ISA_NUM_IRQS * sizeof(qemu_irq));
 
     isadev = i8259_init_chip(TYPE_I8259, bus, true);
     dev = DEVICE(isadev);

@@ -28,10 +28,16 @@
 #define PLATFORM_H
 
 // Define platform specific functionalities.
-#include <signal.h>
 
 namespace vixl {
-inline void HostBreakpoint() { raise(SIGINT); }
+#ifdef USE_SIMULATOR
+// Currently we assume running the simulator implies running on x86 hardware.
+inline void HostBreakpoint() { asm("int3"); }
+#else
+inline void HostBreakpoint() {
+  // TODO: Implement HostBreakpoint on a64.
+}
+#endif
 }  // namespace vixl
 
 #endif

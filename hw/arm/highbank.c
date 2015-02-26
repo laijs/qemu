@@ -24,7 +24,7 @@
 #include "net/net.h"
 #include "sysemu/sysemu.h"
 #include "hw/boards.h"
-#include "sysemu/block-backend.h"
+#include "sysemu/blockdev.h"
 #include "exec/address-spaces.h"
 #include "qemu/error-report.h"
 
@@ -134,6 +134,7 @@ static VMStateDescription vmstate_highbank_regs = {
     .name = "highbank-regs",
     .version_id = 0,
     .minimum_version_id = 0,
+    .minimum_version_id_old = 0,
     .fields = (VMStateField[]) {
         VMSTATE_UINT32_ARRAY(regs, HighbankRegsState, NUM_REGS),
         VMSTATE_END_OF_LIST(),
@@ -199,13 +200,13 @@ enum cxmachines {
  * 32-bit host, set the reg value of memory to 0xf7ff00000 in the
  * device tree and pass -m 2047 to QEMU.
  */
-static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
+static void calxeda_init(QEMUMachineInitArgs *args, enum cxmachines machine)
 {
-    ram_addr_t ram_size = machine->ram_size;
-    const char *cpu_model = machine->cpu_model;
-    const char *kernel_filename = machine->kernel_filename;
-    const char *kernel_cmdline = machine->kernel_cmdline;
-    const char *initrd_filename = machine->initrd_filename;
+    ram_addr_t ram_size = args->ram_size;
+    const char *cpu_model = args->cpu_model;
+    const char *kernel_filename = args->kernel_filename;
+    const char *kernel_cmdline = args->kernel_cmdline;
+    const char *initrd_filename = args->initrd_filename;
     DeviceState *dev = NULL;
     SysBusDevice *busdev;
     qemu_irq pic[128];
@@ -217,7 +218,7 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
     char *sysboot_filename;
 
     if (!cpu_model) {
-        switch (machine_id) {
+        switch (machine) {
         case CALXEDA_HIGHBANK:
             cpu_model = "cortex-a9";
             break;
@@ -241,18 +242,6 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
         cpuobj = object_new(object_class_get_name(oc));
         cpu = ARM_CPU(cpuobj);
 
-        /* By default A9 and A15 CPUs have EL3 enabled.  This board does not
-         * currently support EL3 so the CPU EL3 property is disabled before
-         * realization.
-         */
-        if (object_property_find(cpuobj, "has_el3", NULL)) {
-            object_property_set_bool(cpuobj, false, "has_el3", &err);
-            if (err) {
-                error_report("%s", error_get_pretty(err));
-                exit(1);
-            }
-        }
-
         if (object_property_find(cpuobj, "reset-cbar", NULL)) {
             object_property_set_int(cpuobj, MPCORE_PERIPHBASE,
                                     "reset-cbar", &error_abort);
@@ -267,13 +256,12 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
 
     sysmem = get_system_memory();
     dram = g_new(MemoryRegion, 1);
-    memory_region_init_ram(dram, NULL, "highbank.dram", ram_size, &error_abort);
+    memory_region_init_ram(dram, NULL, "highbank.dram", ram_size);
     /* SDRAM at address zero.  */
     memory_region_add_subregion(sysmem, 0, dram);
 
     sysram = g_new(MemoryRegion, 1);
-    memory_region_init_ram(sysram, NULL, "highbank.sysram", 0x8000,
-                           &error_abort);
+    memory_region_init_ram(sysram, NULL, "highbank.sysram", 0x8000);
     memory_region_add_subregion(sysmem, 0xfff88000, sysram);
     if (bios_name != NULL) {
         sysboot_filename = qemu_find_file(QEMU_FILE_TYPE_BIOS, bios_name);
@@ -287,7 +275,7 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
         }
     }
 
-    switch (machine_id) {
+    switch (machine) {
     case CALXEDA_HIGHBANK:
         dev = qdev_create(NULL, "l2x0");
         qdev_init_nofail(dev);
@@ -372,14 +360,14 @@ static void calxeda_init(MachineState *machine, enum cxmachines machine_id)
     arm_load_kernel(ARM_CPU(first_cpu), &highbank_binfo);
 }
 
-static void highbank_init(MachineState *machine)
+static void highbank_init(QEMUMachineInitArgs *args)
 {
-    calxeda_init(machine, CALXEDA_HIGHBANK);
+    calxeda_init(args, CALXEDA_HIGHBANK);
 }
 
-static void midway_init(MachineState *machine)
+static void midway_init(QEMUMachineInitArgs *args)
 {
-    calxeda_init(machine, CALXEDA_MIDWAY);
+    calxeda_init(args, CALXEDA_MIDWAY);
 }
 
 static QEMUMachine highbank_machine = {

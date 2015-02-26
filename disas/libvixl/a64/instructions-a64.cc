@@ -30,37 +30,23 @@
 namespace vixl {
 
 
-// Floating-point infinity values.
-const float kFP32PositiveInfinity = rawbits_to_float(0x7f800000);
-const float kFP32NegativeInfinity = rawbits_to_float(0xff800000);
-const double kFP64PositiveInfinity =
-    rawbits_to_double(UINT64_C(0x7ff0000000000000));
-const double kFP64NegativeInfinity =
-    rawbits_to_double(UINT64_C(0xfff0000000000000));
-
-
-// The default NaN values (for FPCR.DN=1).
-const double kFP64DefaultNaN = rawbits_to_double(UINT64_C(0x7ff8000000000000));
-const float kFP32DefaultNaN = rawbits_to_float(0x7fc00000);
-
-
 static uint64_t RotateRight(uint64_t value,
                             unsigned int rotate,
                             unsigned int width) {
-  VIXL_ASSERT(width <= 64);
+  ASSERT(width <= 64);
   rotate &= 63;
-  return ((value & ((UINT64_C(1) << rotate) - 1)) <<
-          (width - rotate)) | (value >> rotate);
+  return ((value & ((1UL << rotate) - 1UL)) << (width - rotate)) |
+         (value >> rotate);
 }
 
 
 static uint64_t RepeatBitsAcrossReg(unsigned reg_size,
                                     uint64_t value,
                                     unsigned width) {
-  VIXL_ASSERT((width == 2) || (width == 4) || (width == 8) || (width == 16) ||
-              (width == 32));
-  VIXL_ASSERT((reg_size == kWRegSize) || (reg_size == kXRegSize));
-  uint64_t result = value & ((UINT64_C(1) << width) - 1);
+  ASSERT((width == 2) || (width == 4) || (width == 8) || (width == 16) ||
+         (width == 32));
+  ASSERT((reg_size == kWRegSize) || (reg_size == kXRegSize));
+  uint64_t result = value & ((1UL << width) - 1UL);
   for (unsigned i = width; i < reg_size; i *= 2) {
     result |= (result << i);
   }
@@ -68,59 +54,10 @@ static uint64_t RepeatBitsAcrossReg(unsigned reg_size,
 }
 
 
-bool Instruction::IsLoad() const {
-  if (Mask(LoadStoreAnyFMask) != LoadStoreAnyFixed) {
-    return false;
-  }
-
-  if (Mask(LoadStorePairAnyFMask) == LoadStorePairAnyFixed) {
-    return Mask(LoadStorePairLBit) != 0;
-  } else {
-    LoadStoreOp op = static_cast<LoadStoreOp>(Mask(LoadStoreOpMask));
-    switch (op) {
-      case LDRB_w:
-      case LDRH_w:
-      case LDR_w:
-      case LDR_x:
-      case LDRSB_w:
-      case LDRSB_x:
-      case LDRSH_w:
-      case LDRSH_x:
-      case LDRSW_x:
-      case LDR_s:
-      case LDR_d: return true;
-      default: return false;
-    }
-  }
-}
-
-
-bool Instruction::IsStore() const {
-  if (Mask(LoadStoreAnyFMask) != LoadStoreAnyFixed) {
-    return false;
-  }
-
-  if (Mask(LoadStorePairAnyFMask) == LoadStorePairAnyFixed) {
-    return Mask(LoadStorePairLBit) == 0;
-  } else {
-    LoadStoreOp op = static_cast<LoadStoreOp>(Mask(LoadStoreOpMask));
-    switch (op) {
-      case STRB_w:
-      case STRH_w:
-      case STR_w:
-      case STR_x:
-      case STR_s:
-      case STR_d: return true;
-      default: return false;
-    }
-  }
-}
-
-
 // Logical immediates can't encode zero, so a return value of zero is used to
 // indicate a failure case. Specifically, where the constraints on imm_s are
 // not met.
-uint64_t Instruction::ImmLogical() const {
+uint64_t Instruction::ImmLogical() {
   unsigned reg_size = SixtyFourBits() ? kXRegSize : kWRegSize;
   int64_t n = BitN();
   int64_t imm_s = ImmSetBits();
@@ -147,7 +84,7 @@ uint64_t Instruction::ImmLogical() const {
     if (imm_s == 0x3F) {
       return 0;
     }
-    uint64_t bits = (UINT64_C(1) << (imm_s + 1)) - 1;
+    uint64_t bits = (1UL << (imm_s + 1)) - 1;
     return RotateRight(bits, imm_r, 64);
   } else {
     if ((imm_s >> 1) == 0x1F) {
@@ -159,19 +96,19 @@ uint64_t Instruction::ImmLogical() const {
         if ((imm_s & mask) == mask) {
           return 0;
         }
-        uint64_t bits = (UINT64_C(1) << ((imm_s & mask) + 1)) - 1;
+        uint64_t bits = (1UL << ((imm_s & mask) + 1)) - 1;
         return RepeatBitsAcrossReg(reg_size,
                                    RotateRight(bits, imm_r & mask, width),
                                    width);
       }
     }
   }
-  VIXL_UNREACHABLE();
+  UNREACHABLE();
   return 0;
 }
 
 
-float Instruction::ImmFP32() const {
+float Instruction::ImmFP32() {
   //  ImmFP: abcdefgh (8 bits)
   // Single: aBbb.bbbc.defg.h000.0000.0000.0000.0000 (32 bits)
   // where B is b ^ 1
@@ -185,7 +122,7 @@ float Instruction::ImmFP32() const {
 }
 
 
-double Instruction::ImmFP64() const {
+double Instruction::ImmFP64() {
   //  ImmFP: abcdefgh (8 bits)
   // Double: aBbb.bbbb.bbcd.efgh.0000.0000.0000.0000
   //         0000.0000.0000.0000.0000.0000.0000.0000 (64 bits)
@@ -211,25 +148,18 @@ LSDataSize CalcLSPairDataSize(LoadStorePairOp op) {
 }
 
 
-const Instruction* Instruction::ImmPCOffsetTarget() const {
-  const Instruction * base = this;
+Instruction* Instruction::ImmPCOffsetTarget() {
   ptrdiff_t offset;
   if (IsPCRelAddressing()) {
-    // ADR and ADRP.
+    // PC-relative addressing. Only ADR is supported.
     offset = ImmPCRel();
-    if (Mask(PCRelAddressingMask) == ADRP) {
-      base = AlignDown(base, kPageSize);
-      offset *= kPageSize;
-    } else {
-      VIXL_ASSERT(Mask(PCRelAddressingMask) == ADR);
-    }
   } else {
     // All PC-relative branches.
-    VIXL_ASSERT(BranchType() != UnknownBranchType);
+    ASSERT(BranchType() != UnknownBranchType);
     // Relative branch offsets are instruction-size-aligned.
     offset = ImmBranch() << kInstructionSizeLog2;
   }
-  return base + offset;
+  return this + offset;
 }
 
 
@@ -239,13 +169,13 @@ inline int Instruction::ImmBranch() const {
     case UncondBranchType: return ImmUncondBranch();
     case CompareBranchType: return ImmCmpBranch();
     case TestBranchType: return ImmTestBranch();
-    default: VIXL_UNREACHABLE();
+    default: UNREACHABLE();
   }
   return 0;
 }
 
 
-void Instruction::SetImmPCOffsetTarget(const Instruction* target) {
+void Instruction::SetImmPCOffsetTarget(Instruction* target) {
   if (IsPCRelAddressing()) {
     SetPCRelImmTarget(target);
   } else {
@@ -254,24 +184,18 @@ void Instruction::SetImmPCOffsetTarget(const Instruction* target) {
 }
 
 
-void Instruction::SetPCRelImmTarget(const Instruction* target) {
-  int32_t imm21;
-  if ((Mask(PCRelAddressingMask) == ADR)) {
-    imm21 = target - this;
-  } else {
-    VIXL_ASSERT(Mask(PCRelAddressingMask) == ADRP);
-    uintptr_t this_page = reinterpret_cast<uintptr_t>(this) / kPageSize;
-    uintptr_t target_page = reinterpret_cast<uintptr_t>(target) / kPageSize;
-    imm21 = target_page - this_page;
-  }
-  Instr imm = Assembler::ImmPCRelAddress(imm21);
+void Instruction::SetPCRelImmTarget(Instruction* target) {
+  // ADRP is not supported, so 'this' must point to an ADR instruction.
+  ASSERT(Mask(PCRelAddressingMask) == ADR);
+
+  Instr imm = Assembler::ImmPCRelAddress(target - this);
 
   SetInstructionBits(Mask(~ImmPCRel_mask) | imm);
 }
 
 
-void Instruction::SetBranchImmTarget(const Instruction* target) {
-  VIXL_ASSERT(((target - this) & 3) == 0);
+void Instruction::SetBranchImmTarget(Instruction* target) {
+  ASSERT(((target - this) & 3) == 0);
   Instr branch_imm = 0;
   uint32_t imm_mask = 0;
   int offset = (target - this) >> kInstructionSizeLog2;
@@ -296,15 +220,15 @@ void Instruction::SetBranchImmTarget(const Instruction* target) {
       imm_mask = ImmTestBranch_mask;
       break;
     }
-    default: VIXL_UNREACHABLE();
+    default: UNREACHABLE();
   }
   SetInstructionBits(Mask(~imm_mask) | branch_imm);
 }
 
 
-void Instruction::SetImmLLiteral(const Instruction* source) {
-  VIXL_ASSERT(IsWordAligned(source));
-  ptrdiff_t offset = (source - this) >> kLiteralEntrySizeLog2;
+void Instruction::SetImmLLiteral(Instruction* source) {
+  ASSERT(((source - this) & 3) == 0);
+  int offset = (source - this) >> kLiteralEntrySizeLog2;
   Instr imm = Assembler::ImmLLiteral(offset);
   Instr mask = ImmLLiteral_mask;
 
