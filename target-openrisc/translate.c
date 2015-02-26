@@ -26,10 +26,13 @@
 #include "qemu/log.h"
 #include "config.h"
 #include "qemu/bitops.h"
+#include "exec/cpu_ldst.h"
 
-#include "helper.h"
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-proto.h"
+#include "exec/helper-gen.h"
+
+#include "trace-tcg.h"
+
 
 #define OPENRISC_DISAS
 
@@ -531,14 +534,14 @@ static void dec_calc(DisasContext *dc, uint32_t insn)
                 TCGv_i64 high = tcg_temp_new_i64();
                 TCGv_i32 sr_ove = tcg_temp_local_new_i32();
                 int lab = gen_new_label();
-                /* Calculate the each result.  */
+                /* Calculate each result. */
                 tcg_gen_extu_i32_i64(tra, cpu_R[ra]);
                 tcg_gen_extu_i32_i64(trb, cpu_R[rb]);
                 tcg_gen_mul_i64(result, tra, trb);
                 tcg_temp_free_i64(tra);
                 tcg_temp_free_i64(trb);
                 tcg_gen_shri_i64(high, result, TARGET_LONG_BITS);
-                /* Overflow or not.  */
+                /* Overflow or not. */
                 tcg_gen_brcondi_i64(TCG_COND_EQ, high, 0x00000000, lab);
                 tcg_gen_ori_tl(cpu_sr, cpu_sr, (SR_OV | SR_CY));
                 tcg_gen_andi_tl(sr_ove, cpu_sr, SR_OVE);
@@ -1317,7 +1320,7 @@ static void dec_sys(DisasContext *dc, uint32_t insn)
 #ifdef OPENRISC_DISAS
     uint32_t K16;
 #endif
-    op0 = extract32(insn, 16, 8);
+    op0 = extract32(insn, 16, 10);
 #ifdef OPENRISC_DISAS
     K16 = extract32(insn, 0, 16);
 #endif
@@ -1639,7 +1642,6 @@ static inline void gen_intermediate_code_internal(OpenRISCCPU *cpu,
 {
     CPUState *cs = CPU(cpu);
     struct DisasContext ctx, *dc = &ctx;
-    uint16_t *gen_opc_end;
     uint32_t pc_start;
     int j, k;
     uint32_t next_page_start;
@@ -1649,7 +1651,6 @@ static inline void gen_intermediate_code_internal(OpenRISCCPU *cpu,
     pc_start = tb->pc;
     dc->tb = tb;
 
-    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
     dc->is_jmp = DISAS_NEXT;
     dc->ppc = pc_start;
     dc->pc = pc_start;
@@ -1672,12 +1673,12 @@ static inline void gen_intermediate_code_internal(OpenRISCCPU *cpu,
         max_insns = CF_COUNT_MASK;
     }
 
-    gen_tb_start();
+    gen_tb_start(tb);
 
     do {
         check_breakpoint(cpu, dc);
         if (search_pc) {
-            j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
+            j = tcg_op_buf_count();
             if (k < j) {
                 k++;
                 while (k < j) {
@@ -1718,7 +1719,7 @@ static inline void gen_intermediate_code_internal(OpenRISCCPU *cpu,
             }
         }
     } while (!dc->is_jmp
-             && tcg_ctx.gen_opc_ptr < gen_opc_end
+             && !tcg_op_buf_full()
              && !cs->singlestep_enabled
              && !singlestep
              && (dc->pc < next_page_start)
@@ -1756,9 +1757,9 @@ static inline void gen_intermediate_code_internal(OpenRISCCPU *cpu,
     }
 
     gen_tb_end(tb, num_insns);
-    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
+
     if (search_pc) {
-        j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
+        j = tcg_op_buf_count();
         k++;
         while (k <= j) {
             tcg_ctx.gen_opc_instr_start[k++] = 0;
@@ -1772,9 +1773,8 @@ static inline void gen_intermediate_code_internal(OpenRISCCPU *cpu,
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
         qemu_log("\n");
         log_target_disas(&cpu->env, pc_start, dc->pc - pc_start, 0);
-        qemu_log("\nisize=%d osize=%td\n",
-            dc->pc - pc_start, tcg_ctx.gen_opc_ptr -
-            tcg_ctx.gen_opc_buf);
+        qemu_log("\nisize=%d osize=%d\n",
+                 dc->pc - pc_start, tcg_op_buf_count());
     }
 #endif
 }

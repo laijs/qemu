@@ -92,6 +92,21 @@ static bool kvm_arm_gic_can_save_restore(GICState *s)
     return s->dev_fd >= 0;
 }
 
+static bool kvm_gic_supports_attr(GICState *s, int group, int attrnum)
+{
+    struct kvm_device_attr attr = {
+        .group = group,
+        .attr = attrnum,
+        .flags = 0,
+    };
+
+    if (s->dev_fd == -1) {
+        return false;
+    }
+
+    return kvm_device_ioctl(s->dev_fd, KVM_HAS_DEVICE_ATTR, &attr) == 0;
+}
+
 static void kvm_gic_access(GICState *s, int group, int offset,
                                    int cpu, uint32_t *val, bool write)
 {
@@ -517,10 +532,12 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
     GICState *s = KVM_ARM_GIC(dev);
     SysBusDevice *sbd = SYS_BUS_DEVICE(dev);
     KVMARMGICClass *kgc = KVM_ARM_GIC_GET_CLASS(s);
+    Error *local_err = NULL;
     int ret;
 
-    kgc->parent_realize(dev, errp);
-    if (error_is_set(errp)) {
+    kgc->parent_realize(dev, &local_err);
+    if (local_err) {
+        error_propagate(errp, local_err);
         return;
     }
 
@@ -549,6 +566,11 @@ static void kvm_arm_gic_realize(DeviceState *dev, Error **errp)
     } else if (ret != -ENODEV && ret != -ENOTSUP) {
         error_setg_errno(errp, -ret, "error creating in-kernel VGIC");
         return;
+    }
+
+    if (kvm_gic_supports_attr(s, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0)) {
+        uint32_t numirqs = s->num_irq;
+        kvm_gic_access(s, KVM_DEV_ARM_VGIC_GRP_NR_IRQS, 0, 0, &numirqs, 1);
     }
 
     /* Distributor */

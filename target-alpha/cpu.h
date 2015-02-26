@@ -24,14 +24,13 @@
 #include "qemu-common.h"
 
 #define TARGET_LONG_BITS 64
+#define ALIGNED_ONLY
 
 #define CPUArchState struct CPUAlphaState
 
 #include "exec/cpu-defs.h"
 
 #include "fpu/softfloat.h"
-
-#define TARGET_HAS_ICE 1
 
 #define ELF_MACHINE     EM_ALPHA
 

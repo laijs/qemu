@@ -19,13 +19,16 @@
 
 #include "cpu.h"
 #include "disas/disas.h"
-#include "helper.h"
+#include "exec/helper-proto.h"
 #include "tcg-op.h"
 
+#include "exec/cpu_ldst.h"
 #include "hw/lm32/lm32_pic.h"
 
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-gen.h"
+
+#include "trace-tcg.h"
+
 
 #define DISAS_LM32 1
 #if DISAS_LM32
@@ -862,24 +865,24 @@ static void dec_wcsr(DisasContext *dc)
         break;
     case CSR_IM:
         /* mark as an io operation because it could cause an interrupt */
-        if (use_icount) {
+        if (dc->tb->cflags & CF_USE_ICOUNT) {
             gen_io_start();
         }
         gen_helper_wcsr_im(cpu_env, cpu_R[dc->r1]);
         tcg_gen_movi_tl(cpu_pc, dc->pc + 4);
-        if (use_icount) {
+        if (dc->tb->cflags & CF_USE_ICOUNT) {
             gen_io_end();
         }
         dc->is_jmp = DISAS_UPDATE;
         break;
     case CSR_IP:
         /* mark as an io operation because it could cause an interrupt */
-        if (use_icount) {
+        if (dc->tb->cflags & CF_USE_ICOUNT) {
             gen_io_start();
         }
         gen_helper_wcsr_ip(cpu_env, cpu_R[dc->r1]);
         tcg_gen_movi_tl(cpu_pc, dc->pc + 4);
-        if (use_icount) {
+        if (dc->tb->cflags & CF_USE_ICOUNT) {
             gen_io_end();
         }
         dc->is_jmp = DISAS_UPDATE;
@@ -1059,7 +1062,6 @@ void gen_intermediate_code_internal(LM32CPU *cpu,
     CPUState *cs = CPU(cpu);
     CPULM32State *env = &cpu->env;
     struct DisasContext ctx, *dc = &ctx;
-    uint16_t *gen_opc_end;
     uint32_t pc_start;
     int j, lj;
     uint32_t next_page_start;
@@ -1071,8 +1073,6 @@ void gen_intermediate_code_internal(LM32CPU *cpu,
     dc->num_breakpoints = cpu->num_breakpoints;
     dc->num_watchpoints = cpu->num_watchpoints;
     dc->tb = tb;
-
-    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
 
     dc->is_jmp = DISAS_NEXT;
     dc->pc = pc_start;
@@ -1092,12 +1092,12 @@ void gen_intermediate_code_internal(LM32CPU *cpu,
         max_insns = CF_COUNT_MASK;
     }
 
-    gen_tb_start();
+    gen_tb_start(tb);
     do {
         check_breakpoint(env, dc);
 
         if (search_pc) {
-            j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
+            j = tcg_op_buf_count();
             if (lj < j) {
                 lj++;
                 while (lj < j) {
@@ -1121,7 +1121,7 @@ void gen_intermediate_code_internal(LM32CPU *cpu,
         num_insns++;
 
     } while (!dc->is_jmp
-         && tcg_ctx.gen_opc_ptr < gen_opc_end
+         && !tcg_op_buf_full()
          && !cs->singlestep_enabled
          && !singlestep
          && (dc->pc < next_page_start)
@@ -1155,9 +1155,9 @@ void gen_intermediate_code_internal(LM32CPU *cpu,
     }
 
     gen_tb_end(tb, num_insns);
-    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
+
     if (search_pc) {
-        j = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
+        j = tcg_op_buf_count();
         lj++;
         while (lj <= j) {
             tcg_ctx.gen_opc_instr_start[lj++] = 0;
@@ -1171,9 +1171,8 @@ void gen_intermediate_code_internal(LM32CPU *cpu,
     if (qemu_loglevel_mask(CPU_LOG_TB_IN_ASM)) {
         qemu_log("\n");
         log_target_disas(env, pc_start, dc->pc - pc_start, 0);
-        qemu_log("\nisize=%d osize=%td\n",
-            dc->pc - pc_start, tcg_ctx.gen_opc_ptr -
-            tcg_ctx.gen_opc_buf);
+        qemu_log("\nisize=%d osize=%d\n",
+                 dc->pc - pc_start, tcg_op_buf_count());
     }
 #endif
 }

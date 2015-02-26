@@ -15,6 +15,18 @@
 #include "exec/memory.h"
 
 /**
+ * kvm_arm_vcpu_init:
+ * @cs: CPUState
+ *
+ * Initialize (or reinitialize) the VCPU by invoking the
+ * KVM_ARM_VCPU_INIT ioctl with the CPU type and feature
+ * bitmask specified in the CPUState.
+ *
+ * Returns: 0 if success else < 0 error code
+ */
+int kvm_arm_vcpu_init(CPUState *cs);
+
+/**
  * kvm_arm_register_device:
  * @mr: memory region for this device
  * @devid: the KVM device ID
@@ -33,6 +45,28 @@
  */
 void kvm_arm_register_device(MemoryRegion *mr, uint64_t devid, uint64_t group,
                              uint64_t attr, int dev_fd);
+
+/**
+ * kvm_arm_init_cpreg_list:
+ * @cs: CPUState
+ *
+ * Initialize the CPUState's cpreg list according to the kernel's
+ * definition of what CPU registers it knows about (and throw away
+ * the previous TCG-created cpreg list).
+ *
+ * Returns: 0 if success, else < 0 error code
+ */
+int kvm_arm_init_cpreg_list(ARMCPU *cpu);
+
+/**
+ * kvm_arm_reg_syncs_via_cpreg_list
+ * regidx: KVM register index
+ *
+ * Return true if this KVM register should be synchronized via the
+ * cpreg list of arbitrary system registers, false if it is synchronized
+ * by hand using code in kvm_arch_get/put_registers().
+ */
+bool kvm_arm_reg_syncs_via_cpreg_list(uint64_t regidx);
 
 /**
  * write_list_to_kvmstate:
@@ -66,6 +100,14 @@ bool write_list_to_kvmstate(ARMCPU *cpu);
  * reading all registers in the list.
  */
 bool write_kvmstate_to_list(ARMCPU *cpu);
+
+/**
+ * kvm_arm_reset_vcpu:
+ * @cpu: ARMCPU
+ *
+ * Called at reset time to kernel registers to their initial values.
+ */
+void kvm_arm_reset_vcpu(ARMCPU *cpu);
 
 #ifdef CONFIG_KVM
 /**

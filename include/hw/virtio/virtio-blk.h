@@ -17,6 +17,7 @@
 #include "hw/virtio/virtio.h"
 #include "hw/block/block.h"
 #include "sysemu/iothread.h"
+#include "sysemu/block-backend.h"
 
 #define TYPE_VIRTIO_BLK "virtio-blk-device"
 #define VIRTIO_BLK(obj) \
@@ -112,47 +113,54 @@ struct VirtIOBlkConf
     uint32_t scsi;
     uint32_t config_wce;
     uint32_t data_plane;
+    uint32_t request_merging;
 };
 
 struct VirtIOBlockDataPlane;
 
+struct VirtIOBlockReq;
 typedef struct VirtIOBlock {
     VirtIODevice parent_obj;
-    BlockDriverState *bs;
+    BlockBackend *blk;
     VirtQueue *vq;
     void *rq;
     QEMUBH *bh;
-    BlockConf *conf;
-    VirtIOBlkConf blk;
+    VirtIOBlkConf conf;
     unsigned short sector_mask;
     bool original_wce;
     VMChangeStateEntry *change;
-#ifdef CONFIG_VIRTIO_BLK_DATA_PLANE
+    /* Function to push to vq and notify guest */
+    void (*complete_request)(struct VirtIOBlockReq *req, unsigned char status);
     Notifier migration_state_notifier;
     struct VirtIOBlockDataPlane *dataplane;
-#endif
 } VirtIOBlock;
 
-#define DEFINE_VIRTIO_BLK_FEATURES(_state, _field) \
-        DEFINE_VIRTIO_COMMON_FEATURES(_state, _field)
+typedef struct VirtIOBlockReq {
+    int64_t sector_num;
+    VirtIOBlock *dev;
+    VirtQueueElement elem;
+    struct virtio_blk_inhdr *in;
+    struct virtio_blk_outhdr out;
+    QEMUIOVector qiov;
+    struct VirtIOBlockReq *next;
+    struct VirtIOBlockReq *mr_next;
+    BlockAcctCookie acct;
+} VirtIOBlockReq;
 
-#ifdef __linux__
-#define DEFINE_VIRTIO_BLK_PROPERTIES(_state, _field)                          \
-        DEFINE_BLOCK_PROPERTIES(_state, _field.conf),                         \
-        DEFINE_BLOCK_CHS_PROPERTIES(_state, _field.conf),                     \
-        DEFINE_PROP_STRING("serial", _state, _field.serial),                  \
-        DEFINE_PROP_BIT("config-wce", _state, _field.config_wce, 0, true),    \
-        DEFINE_PROP_BIT("scsi", _state, _field.scsi, 0, true),                \
-        DEFINE_PROP_IOTHREAD("x-iothread", _state, _field.iothread)
-#else
-#define DEFINE_VIRTIO_BLK_PROPERTIES(_state, _field)                          \
-        DEFINE_BLOCK_PROPERTIES(_state, _field.conf),                         \
-        DEFINE_BLOCK_CHS_PROPERTIES(_state, _field.conf),                     \
-        DEFINE_PROP_STRING("serial", _state, _field.serial),                  \
-        DEFINE_PROP_BIT("config-wce", _state, _field.config_wce, 0, true),    \
-        DEFINE_PROP_IOTHREAD("x-iothread", _state, _field.iothread)
-#endif /* __linux__ */
+#define VIRTIO_BLK_MAX_MERGE_REQS 32
 
-void virtio_blk_set_conf(DeviceState *dev, VirtIOBlkConf *blk);
+typedef struct MultiReqBuffer {
+    VirtIOBlockReq *reqs[VIRTIO_BLK_MAX_MERGE_REQS];
+    unsigned int num_reqs;
+    bool is_write;
+} MultiReqBuffer;
+
+VirtIOBlockReq *virtio_blk_alloc_request(VirtIOBlock *s);
+
+void virtio_blk_free_request(VirtIOBlockReq *req);
+
+void virtio_blk_handle_request(VirtIOBlockReq *req, MultiReqBuffer *mrb);
+
+void virtio_blk_submit_multireq(BlockBackend *blk, MultiReqBuffer *mrb);
 
 #endif

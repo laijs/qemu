@@ -23,10 +23,13 @@
 #include "cpu.h"
 #include "disas/disas.h"
 #include "tcg-op.h"
+#include "exec/cpu_ldst.h"
 
-#include "helper.h"
-#define GEN_HELPER 1
-#include "helper.h"
+#include "exec/helper-proto.h"
+#include "exec/helper-gen.h"
+
+#include "trace-tcg.h"
+
 
 typedef struct DisasContext {
     struct TranslationBlock *tb;
@@ -1862,14 +1865,12 @@ gen_intermediate_code_internal(SuperHCPU *cpu, TranslationBlock *tb,
     CPUSH4State *env = &cpu->env;
     DisasContext ctx;
     target_ulong pc_start;
-    static uint16_t *gen_opc_end;
     CPUBreakpoint *bp;
     int i, ii;
     int num_insns;
     int max_insns;
 
     pc_start = tb->pc;
-    gen_opc_end = tcg_ctx.gen_opc_buf + OPC_MAX_SIZE;
     ctx.pc = pc_start;
     ctx.flags = (uint32_t)tb->flags;
     ctx.bstate = BS_NONE;
@@ -1887,8 +1888,8 @@ gen_intermediate_code_internal(SuperHCPU *cpu, TranslationBlock *tb,
     max_insns = tb->cflags & CF_COUNT_MASK;
     if (max_insns == 0)
         max_insns = CF_COUNT_MASK;
-    gen_tb_start();
-    while (ctx.bstate == BS_NONE && tcg_ctx.gen_opc_ptr < gen_opc_end) {
+    gen_tb_start(tb);
+    while (ctx.bstate == BS_NONE && !tcg_op_buf_full()) {
         if (unlikely(!QTAILQ_EMPTY(&cs->breakpoints))) {
             QTAILQ_FOREACH(bp, &cs->breakpoints, entry) {
                 if (ctx.pc == bp->pc) {
@@ -1901,7 +1902,7 @@ gen_intermediate_code_internal(SuperHCPU *cpu, TranslationBlock *tb,
 	    }
 	}
         if (search_pc) {
-            i = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
+            i = tcg_op_buf_count();
             if (ii < i) {
                 ii++;
                 while (ii < i)
@@ -1959,9 +1960,9 @@ gen_intermediate_code_internal(SuperHCPU *cpu, TranslationBlock *tb,
     }
 
     gen_tb_end(tb, num_insns);
-    *tcg_ctx.gen_opc_ptr = INDEX_op_end;
+
     if (search_pc) {
-        i = tcg_ctx.gen_opc_ptr - tcg_ctx.gen_opc_buf;
+        i = tcg_op_buf_count();
         ii++;
         while (ii <= i)
             tcg_ctx.gen_opc_instr_start[ii++] = 0;

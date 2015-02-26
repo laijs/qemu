@@ -5,6 +5,8 @@
 #include "qemu-common.h"
 #include "qemu/bswap.h"
 
+#define ALIGNED_ONLY
+
 #if !defined(TARGET_SPARC64)
 #define TARGET_LONG_BITS 32
 #define TARGET_DPREGS 16
@@ -28,8 +30,6 @@
 #include "exec/cpu-defs.h"
 
 #include "fpu/softfloat.h"
-
-#define TARGET_HAS_ICE 1
 
 #if !defined(TARGET_SPARC64)
 #define ELF_MACHINE     EM_SPARC

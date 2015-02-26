@@ -39,13 +39,14 @@ _supported_os Linux
 function do_run_qemu()
 {
     echo Testing: "$@"
-    $QEMU -nographic -qmp stdio -serial none "$@"
+    $QEMU -nographic -qmp-pretty stdio -serial none "$@"
     echo
 }
 
 function run_qemu()
 {
-    do_run_qemu "$@" 2>&1 | _filter_testdir | _filter_qmp | sed -e 's/\("actual-size":\s*\)[0-9]\+/\1SIZE/g'
+    do_run_qemu "$@" 2>&1 | _filter_testdir | _filter_qmp | _filter_qemu \
+                          | sed -e 's/\("actual-size":\s*\)[0-9]\+/\1SIZE/g'
 }
 
 size=128M
