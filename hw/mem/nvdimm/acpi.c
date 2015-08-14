@@ -382,12 +382,17 @@ struct cmd_out_get_config_data {
     uint8_t out_buf[0];
 } QEMU_PACKED;
 
+struct cmd_out_set_config_data {
+    uint32_t status;
+} QEMU_PACKED;
+
 struct dsm_out {
     union {
         uint32_t status;
         struct cmd_out_implemented cmd_implemented;
         struct cmd_out_get_config_size cmd_config_size;
         struct cmd_out_get_config_data cmd_config_get;
+        struct cmd_out_set_config_data cmd_config_set;
         uint8_t data[PAGE_SIZE];
     };
 };
@@ -483,6 +488,38 @@ exit:
     return status;
 }
 
+static uint32_t
+dsm_cmd_config_set(PCNVDIMMDevice *nvdimm, struct dsm_buffer *in,
+                   struct dsm_out *out)
+{
+    struct cmd_in_set_config_data *cmd_in = &in->cmd_config_set;
+    uint32_t status;
+
+    if (!nvdimm->configdata) {
+        status = NFIT_STATUS_NOT_SUPPORTED;
+        goto exit;
+    }
+
+    le32_to_cpus(&cmd_in->length);
+    le32_to_cpus(&cmd_in->offset);
+
+    nvdebug("Write Config: offset %#x length %#x.\n", cmd_in->offset,
+            cmd_in->length);
+    if (nvdimm->config_data_size < cmd_in->length + cmd_in->offset) {
+        nvdebug("position %#x is beyond config data (len = %#lx).\n",
+                cmd_in->length + cmd_in->offset, nvdimm->config_data_size);
+        status = NFIT_STATUS_INVALID_PARAS;
+        goto exit;
+    }
+
+    status = NFIT_STATUS_SUCCESS;
+    memcpy(nvdimm->config_data_addr + cmd_in->offset, cmd_in->in_buf,
+           cmd_in->length);
+
+exit:
+    return status;
+}
+
 static void dsm_write_nvdimm(struct dsm_buffer *in, struct dsm_out *out)
 {
     GSList *list = get_nvdimm_built_list();
@@ -509,6 +546,9 @@ static void dsm_write_nvdimm(struct dsm_buffer *in, struct dsm_out *out)
         break;
     case NFIT_CMD_GET_CONFIG_DATA:
         status = dsm_cmd_config_get(nvdimm, in, out);
+        break;
+    case NFIT_CMD_SET_CONFIG_DATA:
+        status = dsm_cmd_config_set(nvdimm, in, out);
         break;
     default:
         status = NFIT_STATUS_NOT_SUPPORTED;
