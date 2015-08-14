@@ -334,6 +334,17 @@ enum {
                            | (1 << NFIT_CMD_GET_CONFIG_SIZE)    \
                            | (1 << NFIT_CMD_GET_CONFIG_DATA))
 
+struct cmd_in_get_config_data {
+    uint32_t offset;
+    uint32_t length;
+} QEMU_PACKED;
+
+struct cmd_in_set_config_data {
+    uint32_t offset;
+    uint32_t length;
+    uint8_t in_buf[0];
+} QEMU_PACKED;
+
 struct dsm_buffer {
     /* RAM page. */
     uint32_t handle;
@@ -341,6 +352,7 @@ struct dsm_buffer {
     uint32_t arg1;
     uint32_t arg2;
     union {
+        struct cmd_in_set_config_data cmd_config_set;
         char arg3[PAGE_SIZE - 3 * sizeof(uint32_t) - 16 * sizeof(uint8_t)];
     };
 
@@ -358,10 +370,23 @@ struct cmd_out_implemented {
     uint64_t cmd_list;
 };
 
+struct cmd_out_get_config_size {
+    uint32_t status;
+    uint32_t config_size;
+    uint32_t max_xfer;
+} QEMU_PACKED;
+
+struct cmd_out_get_config_data {
+    uint32_t status;
+    uint8_t out_buf[0];
+} QEMU_PACKED;
+
 struct dsm_out {
     union {
         uint32_t status;
         struct cmd_out_implemented cmd_implemented;
+        struct cmd_out_get_config_size cmd_config_size;
+        struct cmd_out_get_config_data cmd_config_get;
         uint8_t data[PAGE_SIZE];
     };
 };
@@ -387,6 +412,48 @@ static void dsm_write_root(struct dsm_buffer *in, struct dsm_out *out)
     nvdebug("Return status %#x.\n", out->status);
 }
 
+/*
+ * the max transfer size is the max size transfered by both a
+ * NFIT_CMD_GET_CONFIG_DATA and a NFIT_CMD_SET_CONFIG_DATA
+ * command.
+ */
+static uint32_t max_xfer_config_size(void)
+{
+    struct dsm_buffer *in;
+    struct dsm_out *out;
+    uint32_t max_get_size, max_set_size;
+
+    /*
+     * the max data ACPI can read one time which is transfered by
+     * the response of NFIT_CMD_GET_CONFIG_DATA.
+     */
+    max_get_size = sizeof(out->data) - sizeof(out->cmd_config_get);
+
+    /*
+     * the max data ACPI can write one time which is transfered by
+     * NFIT_CMD_SET_CONFIG_DATA
+     */
+    max_set_size = sizeof(in->arg3) - sizeof(in->cmd_config_set);
+    return MIN(max_get_size, max_set_size);
+}
+
+static uint32_t
+dsm_cmd_config_size(PCNVDIMMDevice *nvdimm, struct dsm_buffer *in,
+                    struct dsm_out *out)
+{
+    uint32_t config_size, mxfer;
+
+    config_size = nvdimm->config_data_size;
+    mxfer = max_xfer_config_size();
+
+    out->cmd_config_size.config_size = cpu_to_le32(config_size);
+    out->cmd_config_size.max_xfer = cpu_to_le32(mxfer);
+    nvdebug("%s config_size %#x, max_xfer %#x.\n", __func__, config_size,
+            mxfer);
+
+    return NFIT_STATUS_SUCCESS;
+}
+
 static void dsm_write_nvdimm(struct dsm_buffer *in, struct dsm_out *out)
 {
     GSList *list = get_nvdimm_built_list();
@@ -408,6 +475,9 @@ static void dsm_write_nvdimm(struct dsm_buffer *in, struct dsm_out *out)
 
         out->cmd_implemented.cmd_list = cpu_to_le64(cmd_list);
         goto free;
+    case NFIT_CMD_GET_CONFIG_SIZE:
+        status = dsm_cmd_config_size(nvdimm, in, out);
+        break;
     default:
         status = NFIT_STATUS_NOT_SUPPORTED;
     };
