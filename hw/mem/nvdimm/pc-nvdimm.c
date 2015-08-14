@@ -29,7 +29,7 @@
 #include "exec/address-spaces.h"
 #include "hw/mem/pc-nvdimm.h"
 
-#define PAGE_SIZE               (1UL << 12)
+#include "internal.h"
 
 #define MIN_CONFIG_DATA_SIZE    (128 << 10)
 
@@ -63,6 +63,31 @@ static ram_addr_t reserved_range_push(uint64_t size)
 static uint32_t new_device_index(void)
 {
     return nvdimms_info.device_index++;
+}
+
+static int pc_nvdimm_built_list(Object *obj, void *opaque)
+{
+    GSList **list = opaque;
+
+    if (object_dynamic_cast(obj, TYPE_PC_NVDIMM)) {
+        PCNVDIMMDevice *nvdimm = PC_NVDIMM(obj);
+
+        /* only realized NVDIMMs matter */
+        if (memory_region_size(&nvdimm->mr)) {
+            *list = g_slist_append(*list, nvdimm);
+        }
+    }
+
+    object_child_foreach(obj, pc_nvdimm_built_list, opaque);
+    return 0;
+}
+
+GSList *get_nvdimm_built_list(void)
+{
+    GSList *list = NULL;
+
+    object_child_foreach(qdev_get_machine(), pc_nvdimm_built_list, &list);
+    return list;
 }
 
 static char *get_file(Object *obj, Error **errp)

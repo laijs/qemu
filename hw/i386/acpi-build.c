@@ -39,6 +39,7 @@
 #include "hw/loader.h"
 #include "hw/isa/isa.h"
 #include "hw/acpi/memory_hotplug.h"
+#include "hw/mem/pc-nvdimm.h"
 #include "sysemu/tpm.h"
 #include "hw/acpi/tpm.h"
 #include "sysemu/tpm_backend.h"
@@ -1740,6 +1741,8 @@ void acpi_build(PcGuestInfo *guest_info, AcpiBuildTables *tables)
         acpi_add_table(table_offsets, tables_blob);
         build_dmar_q35(tables_blob, tables->linker);
     }
+
+    pc_nvdimm_build_nfit_table(table_offsets, tables_blob, tables->linker);
 
     /* Add tables supplied by user (if any) */
     for (u = acpi_table_first(); u; u = acpi_table_next(u)) {

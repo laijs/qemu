@@ -36,4 +36,6 @@ typedef struct PCNVDIMMDevice {
     OBJECT_CHECK(PCNVDIMMDevice, (obj), TYPE_PC_NVDIMM)
 
 void pc_nvdimm_reserve_range(ram_addr_t offset);
+void pc_nvdimm_build_nfit_table(GArray *table_offsets, GArray *table_data,
+                                GArray *linker);
 #endif
