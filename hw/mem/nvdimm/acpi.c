@@ -135,10 +135,11 @@ struct nfit_dcr {
     uint8_t reserved2[6];
 } QEMU_PACKED;
 
-#define REVSISON_ID    1
-#define NFIT_FIC1      0x201
+#define REVSISON_ID             1
+#define NFIT_FIC1               0x201
 
 #define MAX_NVDIMM_NUMBER       10
+#define NOTIFY_VALUE            0x99
 
 static int get_nvdimm_device_number(GSList *list)
 {
@@ -281,12 +282,15 @@ static size_t dsm_size;
 static uint64_t dsm_read(void *opaque, hwaddr addr,
                          unsigned size)
 {
+    fprintf(stderr, "BUG: we never read DSM notification MMIO.\n");
+    assert(0);
     return 0;
 }
 
 static void dsm_write(void *opaque, hwaddr addr,
                       uint64_t val, unsigned size)
 {
+    assert(val == NOTIFY_VALUE);
 }
 
 static const MemoryRegionOps dsm_ops = {
@@ -359,5 +363,127 @@ void pc_nvdimm_build_nfit_table(GArray *table_offsets, GArray *table_data,
     build_header(linker, table_data, (void *)(table_data->data + nfit_start),
                  "NFIT", table_data->len - nfit_start, 1);
 exit:
+    g_slist_free(list);
+}
+
+#define BUILD_STA_METHOD(_dev_, _method_)                                  \
+    do {                                                                   \
+        _method_ = aml_method("_STA", 0);                                  \
+        aml_append(_method_, aml_return(aml_int(0x0f)));                   \
+        aml_append(_dev_, _method_);                                       \
+    } while (0)
+
+#define SAVE_ARG012_HANDLE(_method_, _handle_)                             \
+    do {                                                                   \
+        aml_append(_method_, aml_store(_handle_, aml_name("HDLE")));       \
+        aml_append(_method_, aml_store(aml_arg(0), aml_name("ARG0")));     \
+        aml_append(_method_, aml_store(aml_arg(1), aml_name("ARG1")));     \
+        aml_append(_method_, aml_store(aml_arg(2), aml_name("ARG2")));     \
+    } while (0)
+
+#define NOTIFY_AND_RETURN(_method_)                                        \
+    do {                                                                   \
+        aml_append(_method_, aml_store(aml_int(NOTIFY_VALUE),              \
+                   aml_name("NOTI")));                                     \
+        aml_append(_method_, aml_return(aml_name("ODAT")));                \
+    } while (0)
+
+static void build_nvdimm_devices(Aml *root_dev, GSList *list)
+{
+    for (; list; list = list->next) {
+        PCNVDIMMDevice *nvdimm = list->data;
+        uint32_t handle = nvdimm_index_to_handle(nvdimm->device_index);
+        Aml *dev, *method;
+
+        dev = aml_device("NVD%d", nvdimm->device_index);
+        aml_append(dev, aml_name_decl("_ADR", aml_int(handle)));
+
+        BUILD_STA_METHOD(dev, method);
+
+        method = aml_method("_DSM", 4);
+        {
+            SAVE_ARG012_HANDLE(method, aml_int(handle));
+            NOTIFY_AND_RETURN(method);
+        }
+        aml_append(dev, method);
+
+        aml_append(root_dev, dev);
+    }
+}
+
+void pc_nvdimm_build_acpi_devices(Aml *sb_scope)
+{
+    Aml *dev, *method, *field;
+    struct dsm_buffer *dsm_buf;
+    GSList *list = get_nvdimm_built_list();
+    int nr = get_nvdimm_device_number(list);
+
+    if (nr <= 0 || nr > MAX_NVDIMM_NUMBER) {
+        g_slist_free(list);
+        return;
+    }
+
+    dev = aml_device("NVDR");
+    aml_append(dev, aml_name_decl("_HID", aml_string("ACPI0012")));
+
+    /* map DSM buffer into ACPI namespace. */
+    aml_append(dev, aml_operation_region("DSMR", AML_SYSTEM_MEMORY,
+               dsm_addr, dsm_size));
+
+    /*
+     * DSM input:
+     * @HDLE: store device's handle, it's zero if the _DSM call happens
+     *        on ROOT.
+     * @ARG0 ~ @ARG3: store the parameters of _DSM call.
+     *
+     * They are ram mapping on host so that these access never cause VM-EXIT.
+     */
+    field = aml_field("DSMR", AML_DWORD_ACC, AML_PRESERVE);
+    aml_append(field, aml_named_field("HDLE",
+                   sizeof(dsm_buf->handle) * BITS_PER_BYTE));
+    aml_append(field, aml_named_field("ARG0",
+                   sizeof(dsm_buf->arg0) * BITS_PER_BYTE));
+    aml_append(field, aml_named_field("ARG1",
+                   sizeof(dsm_buf->arg1) * BITS_PER_BYTE));
+    aml_append(field, aml_named_field("ARG2",
+                   sizeof(dsm_buf->arg2) * BITS_PER_BYTE));
+    aml_append(field, aml_named_field("ARG3",
+                   sizeof(dsm_buf->arg3) * BITS_PER_BYTE));
+    /*
+     * DSM input:
+     * @NOTI: write value to it will notify QEMU that _DSM method is being
+     *        called and the parameters can be found in dsm_buf.
+     *
+     * It is MMIO mapping on host so that it will cause VM-exit and QEMU
+     * gets control.
+     */
+    aml_append(field, aml_named_field("NOTI",
+                   sizeof(dsm_buf->notify) * BITS_PER_BYTE));
+    aml_append(dev, field);
+
+    /*
+     * DSM output:
+     * @ODAT: it resues the first page of dsm buffer and QEMU uses it to
+     *        stores the result
+     *
+     * Since the first page is reused by both input and out, the input data
+     * will be lost after storing new result into @ODAT
+     */
+    field = aml_field("DSMR", AML_DWORD_ACC, AML_PRESERVE);
+    aml_append(field, aml_named_field("ODAT", PAGE_SIZE * BITS_PER_BYTE));
+    aml_append(dev, field);
+
+    BUILD_STA_METHOD(dev, method);
+
+    method = aml_method("_DSM", 4);
+    {
+        SAVE_ARG012_HANDLE(method, aml_int(0));
+        NOTIFY_AND_RETURN(method);
+    }
+    aml_append(dev, method);
+
+    build_nvdimm_devices(dev, list);
+
+    aml_append(sb_scope, dev);
     g_slist_free(list);
 }

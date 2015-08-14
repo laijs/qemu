@@ -14,6 +14,7 @@
 #define __PC_NVDIMM_H
 
 #include "hw/qdev.h"
+#include "hw/acpi/aml-build.h"
 
 typedef struct PCNVDIMMDevice {
     /* private */
@@ -38,4 +39,5 @@ typedef struct PCNVDIMMDevice {
 void pc_nvdimm_reserve_range(ram_addr_t offset);
 void pc_nvdimm_build_nfit_table(GArray *table_offsets, GArray *table_data,
                                 GArray *linker);
+void pc_nvdimm_build_acpi_devices(Aml *sb_scope);
 #endif

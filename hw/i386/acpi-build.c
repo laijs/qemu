@@ -1342,6 +1342,8 @@ build_ssdt(GArray *table_data, GArray *linker,
                 aml_append(sb_scope, scope);
             }
         }
+
+        pc_nvdimm_build_acpi_devices(sb_scope);
         aml_append(ssdt, sb_scope);
     }
 
