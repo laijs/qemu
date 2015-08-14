@@ -24,6 +24,19 @@
 
 #include "hw/mem/pc-nvdimm.h"
 
+#define PAGE_SIZE      (1UL << 12)
+
+static struct nvdimms_info {
+    ram_addr_t current_addr;
+} nvdimms_info;
+
+/* the address range [offset, ~0ULL) is reserved for NVDIMM. */
+void pc_nvdimm_reserve_range(ram_addr_t offset)
+{
+    offset = ROUND_UP(offset, PAGE_SIZE);
+    nvdimms_info.current_addr = offset;
+}
+
 static char *get_file(Object *obj, Error **errp)
 {
     PCNVDIMMDevice *nvdimm = PC_NVDIMM(obj);

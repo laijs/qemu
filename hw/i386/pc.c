@@ -64,6 +64,7 @@
 #include "hw/pci/pci_host.h"
 #include "acpi-build.h"
 #include "hw/mem/pc-dimm.h"
+#include "hw/mem/pc-nvdimm.h"
 #include "qapi/visitor.h"
 #include "qapi-visit.h"
 
@@ -1302,6 +1303,7 @@ FWCfgState *pc_memory_init(MachineState *machine,
     MemoryRegion *ram_below_4g, *ram_above_4g;
     FWCfgState *fw_cfg;
     PCMachineState *pcms = PC_MACHINE(machine);
+    ram_addr_t offset;
 
     assert(machine->ram_size == below_4g_mem_size + above_4g_mem_size);
 
@@ -1339,6 +1341,8 @@ FWCfgState *pc_memory_init(MachineState *machine,
         exit(EXIT_FAILURE);
     }
 
+    offset = 0x100000000ULL + above_4g_mem_size;
+
     /* initialize hotplug memory address space */
     if (guest_info->has_reserved_memory &&
         (machine->ram_size < machine->maxram_size)) {
@@ -1358,8 +1362,7 @@ FWCfgState *pc_memory_init(MachineState *machine,
             exit(EXIT_FAILURE);
         }
 
-        pcms->hotplug_memory.base =
-            ROUND_UP(0x100000000ULL + above_4g_mem_size, 1ULL << 30);
+        pcms->hotplug_memory.base = ROUND_UP(offset, 1ULL << 30);
 
         if (pcms->enforce_aligned_dimm) {
             /* size hotplug region assuming 1G page max alignment per slot */
@@ -1377,7 +1380,12 @@ FWCfgState *pc_memory_init(MachineState *machine,
                            "hotplug-memory", hotplug_mem_size);
         memory_region_add_subregion(system_memory, pcms->hotplug_memory.base,
                                     &pcms->hotplug_memory.mr);
+
+        offset = pcms->hotplug_memory.base + hotplug_mem_size;
     }
+
+     /* all the space left above 4G is reserved for NVDIMM. */
+    pc_nvdimm_reserve_range(offset);
 
     /* Initialize PC system firmware */
     pc_system_firmware_init(rom_memory, guest_info->isapc_ram_fw);

@@ -28,4 +28,5 @@ typedef struct PCNVDIMMDevice {
 #define PC_NVDIMM(obj) \
     OBJECT_CHECK(PCNVDIMMDevice, (obj), TYPE_PC_NVDIMM)
 
+void pc_nvdimm_reserve_range(ram_addr_t offset);
 #endif
