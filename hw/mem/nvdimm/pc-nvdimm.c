@@ -22,12 +22,20 @@
  * License along with this library; if not, see <http://www.gnu.org/licenses/>
  */
 
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+#include <linux/fs.h>
+
+#include "exec/address-spaces.h"
 #include "hw/mem/pc-nvdimm.h"
 
-#define PAGE_SIZE      (1UL << 12)
+#define PAGE_SIZE               (1UL << 12)
+
+#define MIN_CONFIG_DATA_SIZE    (128 << 10)
 
 static struct nvdimms_info {
     ram_addr_t current_addr;
+    int device_index;
 } nvdimms_info;
 
 /* the address range [offset, ~0ULL) is reserved for NVDIMM. */
@@ -35,6 +43,26 @@ void pc_nvdimm_reserve_range(ram_addr_t offset)
 {
     offset = ROUND_UP(offset, PAGE_SIZE);
     nvdimms_info.current_addr = offset;
+}
+
+static ram_addr_t reserved_range_push(uint64_t size)
+{
+    uint64_t current;
+
+    current = ROUND_UP(nvdimms_info.current_addr, PAGE_SIZE);
+
+    /* do not have enough space? */
+    if (current + size < current) {
+        return 0;
+    }
+
+    nvdimms_info.current_addr = current + size;
+    return current;
+}
+
+static uint32_t new_device_index(void)
+{
+    return nvdimms_info.device_index++;
 }
 
 static char *get_file(Object *obj, Error **errp)
@@ -47,6 +75,11 @@ static char *get_file(Object *obj, Error **errp)
 static void set_file(Object *obj, const char *str, Error **errp)
 {
     PCNVDIMMDevice *nvdimm = PC_NVDIMM(obj);
+
+    if (memory_region_size(&nvdimm->mr)) {
+        error_setg(errp, "cannot change property value");
+        return;
+    }
 
     if (nvdimm->file) {
         g_free(nvdimm->file);
@@ -76,13 +109,87 @@ static void pc_nvdimm_init(Object *obj)
                              set_configdata, NULL);
 }
 
+static uint64_t get_file_size(int fd)
+{
+    struct stat stat_buf;
+    uint64_t size;
+
+    if (fstat(fd, &stat_buf) < 0) {
+        return 0;
+    }
+
+    if (S_ISREG(stat_buf.st_mode)) {
+        return stat_buf.st_size;
+    }
+
+    if (S_ISBLK(stat_buf.st_mode) && !ioctl(fd, BLKGETSIZE64, &size)) {
+        return size;
+    }
+
+    return 0;
+}
+
 static void pc_nvdimm_realize(DeviceState *dev, Error **errp)
 {
     PCNVDIMMDevice *nvdimm = PC_NVDIMM(dev);
+    char name[512];
+    void *buf;
+    ram_addr_t addr;
+    uint64_t size, nvdimm_size, config_size = MIN_CONFIG_DATA_SIZE;
+    int fd;
 
     if (!nvdimm->file) {
         error_setg(errp, "file property is not set");
     }
+
+    fd = open(nvdimm->file, O_RDWR);
+    if (fd < 0) {
+        error_setg(errp, "can not open %s", nvdimm->file);
+        return;
+    }
+
+    size = get_file_size(fd);
+    buf = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (buf == MAP_FAILED) {
+        error_setg(errp, "can not do mmap on %s", nvdimm->file);
+        goto do_close;
+    }
+
+    nvdimm->config_data_size = config_size;
+    if (nvdimm->configdata) {
+        /* reserve MIN_CONFIGDATA_AREA_SIZE for configue data. */
+        nvdimm_size = size - config_size;
+        nvdimm->config_data_addr = buf + nvdimm_size;
+    } else {
+        nvdimm_size = size;
+        nvdimm->config_data_addr = NULL;
+    }
+
+    if ((int64_t)nvdimm_size <= 0) {
+        error_setg(errp, "file size is too small to store NVDIMM"
+                         " configure data");
+        goto do_unmap;
+    }
+
+    addr = reserved_range_push(nvdimm_size);
+    if (!addr) {
+        error_setg(errp, "do not have enough space for size %#lx.\n", size);
+        goto do_unmap;
+    }
+
+    nvdimm->device_index = new_device_index();
+    sprintf(name, "NVDIMM-%d", nvdimm->device_index);
+    memory_region_init_ram_ptr(&nvdimm->mr, OBJECT(dev), name, nvdimm_size,
+                               buf);
+    vmstate_register_ram(&nvdimm->mr, DEVICE(dev));
+    memory_region_add_subregion(get_system_memory(), addr, &nvdimm->mr);
+
+    return;
+
+do_unmap:
+    munmap(buf, size);
+do_close:
+    close(fd);
 }
 
 static void pc_nvdimm_class_init(ObjectClass *oc, void *data)

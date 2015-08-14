@@ -21,6 +21,13 @@ typedef struct PCNVDIMMDevice {
 
     char *file;
     bool configdata;
+
+    int device_index;
+
+    uint64_t config_data_size;
+    void *config_data_addr;
+
+    MemoryRegion mr;
 } PCNVDIMMDevice;
 
 #define TYPE_PC_NVDIMM "pc-nvdimm"
