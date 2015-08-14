@@ -13,6 +13,14 @@
 #ifndef __NVDIMM_INTERNAL_H
 #define __NVDIMM_INTERNAL_H
 
+/* #define NVDIMM_DEBUG */
+
+#ifdef NVDIMM_DEBUG
+#define nvdebug(fmt, ...) fprintf(stderr, "nvdimm: " fmt, ## __VA_ARGS__)
+#else
+#define nvdebug(...)
+#endif
+
 #define PAGE_SIZE               (1UL << 12)
 
 typedef struct {
@@ -27,4 +35,8 @@ typedef struct {
 
 GSList *get_nvdimm_built_list(void);
 ram_addr_t reserved_range_push(uint64_t size);
+
+void calculate_nvdimm_isetcookie(PCNVDIMMDevice *nvdimm, uint64_t spa,
+                                 uint32_t sn);
+void build_nvdimm_configdata(GSList *device_list);
 #endif

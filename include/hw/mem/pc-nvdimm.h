@@ -28,6 +28,8 @@ typedef struct PCNVDIMMDevice {
     uint64_t config_data_size;
     void *config_data_addr;
 
+    uint64_t isetcookie;
+
     MemoryRegion mr;
 } PCNVDIMMDevice;
 

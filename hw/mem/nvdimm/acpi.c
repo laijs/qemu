@@ -240,6 +240,8 @@ static void build_nfit_table(GSList *device_list, char *buf)
 
     for (; device_list; device_list = device_list->next) {
         PCNVDIMMDevice *nvdimm = device_list->data;
+        struct nfit_memdev *nfit_memdev;
+        struct nfit_dcr *nfit_dcr;
         int spa_index, dcr_index;
 
         spa_index = ++index;
@@ -252,10 +254,15 @@ static void build_nfit_table(GSList *device_list, char *buf)
          * build Memory Device to System Physical Address Range Mapping
          * Table.
          */
+        nfit_memdev = (struct nfit_memdev *)buf;
         buf += build_memdev_table(buf, nvdimm, spa_index, dcr_index);
 
         /* build Control Region Descriptor Table. */
+        nfit_dcr = (struct nfit_dcr *)buf;
         buf += build_dcr_table(buf, nvdimm, dcr_index);
+
+        calculate_nvdimm_isetcookie(nvdimm, nfit_memdev->region_spa_offset,
+                                    nfit_dcr->serial_number);
     }
 }
 
@@ -382,6 +389,9 @@ void pc_nvdimm_build_nfit_table(GArray *table_offsets, GArray *table_data,
 
     build_header(linker, table_data, (void *)(table_data->data + nfit_start),
                  "NFIT", table_data->len - nfit_start, 1);
+
+    build_nvdimm_configdata(list);
+
 exit:
     g_slist_free(list);
 }
