@@ -1151,6 +1151,20 @@ Aml *aml_sizeof(Aml *arg)
     return var;
 }
 
+/* ACPI 6.0: 20.2.5.2 Named Objects Encoding: DefCreateField */
+Aml *aml_create_field(Aml *srcbuf, Aml *index, Aml *len, const char *name)
+{
+    Aml *var = aml_alloc();
+
+    build_append_byte(var->buf, 0x5B); /* ExtOpPrefix */
+    build_append_byte(var->buf, 0x13); /* CreateFieldOp */
+    aml_append(var, srcbuf);
+    aml_append(var, index);
+    aml_append(var, len);
+    build_append_namestring(var->buf, "%s", name);
+    return var;
+}
+
 void
 build_header(GArray *linker, GArray *table_data,
              AcpiTableHeader *h, const char *sig, int len, uint8_t rev)
