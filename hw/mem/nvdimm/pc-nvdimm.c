@@ -45,7 +45,7 @@ void pc_nvdimm_reserve_range(ram_addr_t offset)
     nvdimms_info.current_addr = offset;
 }
 
-static ram_addr_t reserved_range_push(uint64_t size)
+ram_addr_t reserved_range_push(uint64_t size)
 {
     uint64_t current;
 

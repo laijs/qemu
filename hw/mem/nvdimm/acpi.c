@@ -28,6 +28,7 @@
 
 #include "qemu-common.h"
 
+#include "exec/address-spaces.h"
 #include "hw/acpi/aml-build.h"
 #include "hw/mem/pc-nvdimm.h"
 
@@ -257,14 +258,91 @@ static void build_nfit_table(GSList *device_list, char *buf)
     }
 }
 
+struct dsm_buffer {
+    /* RAM page. */
+    uint32_t handle;
+    uint8_t arg0[16];
+    uint32_t arg1;
+    uint32_t arg2;
+    union {
+        char arg3[PAGE_SIZE - 3 * sizeof(uint32_t) - 16 * sizeof(uint8_t)];
+    };
+
+    /* MMIO page. */
+    union {
+        uint32_t notify;
+        char pedding[PAGE_SIZE];
+    };
+};
+
+static ram_addr_t dsm_addr;
+static size_t dsm_size;
+
+static uint64_t dsm_read(void *opaque, hwaddr addr,
+                         unsigned size)
+{
+    return 0;
+}
+
+static void dsm_write(void *opaque, hwaddr addr,
+                      uint64_t val, unsigned size)
+{
+}
+
+static const MemoryRegionOps dsm_ops = {
+    .read = dsm_read,
+    .write = dsm_write,
+    .endianness = DEVICE_LITTLE_ENDIAN,
+};
+
+static int build_dsm_buffer(void)
+{
+    MemoryRegion *dsm_ram_mr, *dsm_mmio_mr;
+    ram_addr_t addr;;
+
+    QEMU_BUILD_BUG_ON(PAGE_SIZE * 2 != sizeof(struct dsm_buffer));
+
+    /* DSM buffer has already been built. */
+    if (dsm_addr) {
+        return 0;
+    }
+
+    addr = reserved_range_push(2 * PAGE_SIZE);
+    if (!addr) {
+        return -1;
+    }
+
+    dsm_addr = addr;
+    dsm_size = PAGE_SIZE * 2;
+
+    dsm_ram_mr = g_new(MemoryRegion, 1);
+    memory_region_init_ram(dsm_ram_mr, NULL, "dsm_ram", PAGE_SIZE,
+                           &error_abort);
+    vmstate_register_ram_global(dsm_ram_mr);
+    memory_region_add_subregion(get_system_memory(), addr, dsm_ram_mr);
+
+    dsm_mmio_mr = g_new(MemoryRegion, 1);
+    memory_region_init_io(dsm_mmio_mr, NULL, &dsm_ops, dsm_ram_mr,
+                          "dsm_mmio", PAGE_SIZE);
+    memory_region_add_subregion(get_system_memory(), addr + PAGE_SIZE,
+                                dsm_mmio_mr);
+    return 0;
+}
+
 void pc_nvdimm_build_nfit_table(GArray *table_offsets, GArray *table_data,
                                 GArray *linker)
 {
-    GSList *list = get_nvdimm_built_list();
+    GSList *list;
     size_t total;
     char *buf;
     int nfit_start, nr;
 
+    if (build_dsm_buffer()) {
+        fprintf(stderr, "do not have enough space for DSM buffer.\n");
+        return;
+    }
+
+    list = get_nvdimm_built_list();
     nr = get_nvdimm_device_number(list);
     total = get_nfit_total_size(nr);
 

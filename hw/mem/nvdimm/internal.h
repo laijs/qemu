@@ -26,4 +26,5 @@ typedef struct {
     (d0), (d1), (d2), (d3), (d4), (d5), (d6), (d7) } })
 
 GSList *get_nvdimm_built_list(void);
+ram_addr_t reserved_range_push(uint64_t size);
 #endif
