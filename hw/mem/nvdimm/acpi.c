@@ -259,6 +259,26 @@ static void build_nfit_table(GSList *device_list, char *buf)
     }
 }
 
+enum {
+    NFIT_CMD_IMPLEMENTED = 0,
+
+    /* bus commands */
+    NFIT_CMD_ARS_CAP = 1,
+    NFIT_CMD_ARS_START = 2,
+    NFIT_CMD_ARS_QUERY = 3,
+
+    /* per-dimm commands */
+    NFIT_CMD_SMART = 1,
+    NFIT_CMD_SMART_THRESHOLD = 2,
+    NFIT_CMD_DIMM_FLAGS = 3,
+    NFIT_CMD_GET_CONFIG_SIZE = 4,
+    NFIT_CMD_GET_CONFIG_DATA = 5,
+    NFIT_CMD_SET_CONFIG_DATA = 6,
+    NFIT_CMD_VENDOR_EFFECT_LOG_SIZE = 7,
+    NFIT_CMD_VENDOR_EFFECT_LOG = 8,
+    NFIT_CMD_VENDOR = 9,
+};
+
 struct dsm_buffer {
     /* RAM page. */
     uint32_t handle;
@@ -366,6 +386,19 @@ exit:
     g_slist_free(list);
 }
 
+static bool device_cmd_has_arg3[] = {
+    false,      /* NFIT_CMD_IMPLEMENTED */
+    false,      /* NFIT_CMD_SMART */
+    false,      /* NFIT_CMD_SMART_THRESHOLD */
+    false,      /* NFIT_CMD_DIMM_FLAGS */
+    false,      /* NFIT_CMD_GET_CONFIG_SIZE */
+    true,       /* NFIT_CMD_GET_CONFIG_DATA */
+    true,       /* NFIT_CMD_SET_CONFIG_DATA */
+    false,      /* NFIT_CMD_VENDOR_EFFECT_LOG_SIZE */
+    false,      /* NFIT_CMD_VENDOR_EFFECT_LOG */
+    false,      /* NFIT_CMD_VENDOR */
+};
+
 #define BUILD_STA_METHOD(_dev_, _method_)                                  \
     do {                                                                   \
         _method_ = aml_method("_STA", 0);                                  \
@@ -390,10 +423,20 @@ exit:
 
 static void build_nvdimm_devices(Aml *root_dev, GSList *list)
 {
+    Aml *has_arg3;
+    int i, cmd_nr;
+
+    cmd_nr = ARRAY_SIZE(device_cmd_has_arg3);
+    has_arg3 = aml_package(cmd_nr);
+    for (i = 0; i < cmd_nr; i++) {
+        aml_append(has_arg3, aml_int(device_cmd_has_arg3[i]));
+    }
+    aml_append(root_dev, aml_name_decl("CAG3", has_arg3));
+
     for (; list; list = list->next) {
         PCNVDIMMDevice *nvdimm = list->data;
         uint32_t handle = nvdimm_index_to_handle(nvdimm->device_index);
-        Aml *dev, *method;
+        Aml *dev, *method, *ifctx;
 
         dev = aml_device("NVD%d", nvdimm->device_index);
         aml_append(dev, aml_name_decl("_ADR", aml_int(handle)));
@@ -403,6 +446,34 @@ static void build_nvdimm_devices(Aml *root_dev, GSList *list)
         method = aml_method("_DSM", 4);
         {
             SAVE_ARG012_HANDLE(method, aml_int(handle));
+
+            /* Local5 = DeRefOf(Index(CAG3, Arg2)) */
+            aml_append(method,
+                       aml_store(aml_derefof(aml_index(aml_name("CAG3"),
+                       aml_arg(2))), aml_local(5)));
+            /* if 0 < local5 */
+            ifctx = aml_if(aml_lless(aml_int(0), aml_local(5)));
+            {
+                /* Local0 = Index(Arg3, 0) */
+                aml_append(ifctx, aml_store(aml_index(aml_arg(3), aml_int(0)),
+                           aml_local(0)));
+                /* Local1 = sizeof(Local0) */
+                aml_append(ifctx, aml_store(aml_sizeof(aml_local(0)),
+                           aml_local(1)));
+                /* Local2 = Local1 << 3 */
+                aml_append(ifctx, aml_store(aml_shiftleft(aml_local(1),
+                           aml_int(3)), aml_local(2)));
+                /* Local3 = DeRefOf(Local0) */
+                aml_append(ifctx, aml_store(aml_derefof(aml_local(0)),
+                           aml_local(3)));
+                /* CreateField(Local3, 0, local2, IBUF) */
+                aml_append(ifctx, aml_create_field(aml_local(3),
+                           aml_int(0), aml_local(2), "IBUF"));
+                /* ARG3 = IBUF */
+                aml_append(ifctx, aml_store(aml_name("IBUF"),
+                           aml_name("ARG3")));
+            }
+            aml_append(method, ifctx);
             NOTIFY_AND_RETURN(method);
         }
         aml_append(dev, method);
