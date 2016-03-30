@@ -529,11 +529,15 @@
 # @auto-converge: If enabled, QEMU will automatically throttle down the guest
 #          to speed up convergence of RAM migration. (since 1.6)
 #
+# @bypass-shared-memory: the shared memory region will be bypassed on migration.
+#          This feature allows the memory region to be reused by new qemu(s)
+#          or be migrated separately. (since 2.6)
+#
 # Since: 1.2
 ##
 { 'enum': 'MigrationCapability',
   'data': ['xbzrle', 'rdma-pin-all', 'auto-converge', 'zero-blocks',
-           'compress', 'events'] }
+           'compress', 'events', 'bypass-shared-memory'] }
 
 ##
 # @MigrationCapabilityStatus

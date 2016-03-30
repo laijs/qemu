@@ -227,6 +227,15 @@ static void migrate_generate_event(int new_state)
     }
 }
 
+bool migrate_bypass_shared_memory(void)
+{
+    MigrationState *s;
+
+    s = migrate_get_current();
+
+    return s->enabled_capabilities[MIGRATION_CAPABILITY_BYPASS_SHARED_MEMORY];
+}
+
 /*
  * Called on -incoming with a defer: uri.
  * The migration can be started later after any parameters have been

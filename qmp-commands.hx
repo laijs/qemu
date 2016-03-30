@@ -3407,6 +3407,7 @@ Enable/Disable migration capabilities
 - "auto-converge": throttle down guest to help convergence of migration
 - "zero-blocks": compress zero blocks during block migration
 - "events": generate events for each migration state change
+- "bypass-shared-memory": bypass shared memory region
 
 Arguments:
 
@@ -3434,6 +3435,7 @@ Query current migration capabilities
          - "rdma-pin-all" : RDMA Pin Page state (json-bool)
          - "auto-converge" : Auto Converge state (json-bool)
          - "zero-blocks" : Zero Blocks state (json-bool)
+         - "bypass-shared-memory": bypass shared memory state (json-bool)
 
 Arguments:
 
